@@ -36,6 +36,12 @@ WMO_ICONS = {
     95: "⛈️", 96: "⛈️", 99: "⛈️",
 }
 
+TRAFFIC_LABELS = {1: "Libero", 2: "Scorrevole", 3: "Moderato", 4: "Intenso", 5: "Molto intenso"}
+TRAFFIC_COLORS = {1: "#27ae60", 2: "#f1c40f", 3: "#e67e22", 4: "#e74c3c", 5: "#8e44ad"}
+TRAFFIC_ICONS  = {1: "🟢", 2: "🟡", 3: "🟠", 4: "🔴", 5: "🚨"}
+TRAFFIC_DELAY  = {1: 0, 2: 10, 3: 30, 4: 60, 5: 100}
+WEEKDAY_IT     = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+
 # Mapping curva 1-5 → parametri Valhalla moto
 CURVE_SETTINGS = {
     1: {"use_highways": 1.0, "use_tolls": 0.5, "use_trails": 0.0},
@@ -188,6 +194,50 @@ def weather_segment():
         results = list(ex.map(fetch, points))
 
     return jsonify([r for r in results if r is not None])
+
+
+@app.route("/api/traffic-segment", methods=["POST"])
+def traffic_segment():
+    """Stima traffico ogni 20 km lungo un tratto, basata su giorno+ora stimata di passaggio."""
+    data = request.get_json() or {}
+    geometry     = data.get("geometry")
+    date_str     = data.get("date")
+    time_str     = data.get("time", "09:00")
+    duration_sec = float(data.get("duration_sec", 0))
+    distance_km  = float(data.get("distance_km", 1))
+
+    if not geometry or not date_str:
+        return jsonify({"error": "geometry e date sono obbligatori"}), 400
+
+    coords = geometry.get("coordinates", [])
+    if len(coords) < 2:
+        return jsonify({"error": "Geometria non valida"}), 400
+
+    try:
+        departure = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return jsonify({"error": "Formato data/ora non valido (YYYY-MM-DD HH:MM)"}), 400
+
+    points  = _sample_route_points(coords, interval_km=20)
+    results = []
+
+    for pt in points:
+        fraction = min(pt["dist_km"] / distance_km, 1.0) if distance_km > 0 else 0.0
+        point_dt = departure + timedelta(seconds=fraction * duration_sec)
+        level    = _estimate_traffic_level(point_dt.weekday(), point_dt.hour, point_dt.minute)
+        results.append({
+            "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
+            "estimated_time": point_dt.strftime("%H:%M"),
+            "estimated_date": point_dt.strftime("%Y-%m-%d"),
+            "weekday_name":   WEEKDAY_IT[point_dt.weekday()],
+            "traffic_level":  level,
+            "traffic_label":  TRAFFIC_LABELS[level],
+            "traffic_color":  TRAFFIC_COLORS[level],
+            "traffic_icon":   TRAFFIC_ICONS[level],
+            "delay_percent":  TRAFFIC_DELAY[level],
+        })
+
+    return jsonify(results)
 
 
 # ───── routing helpers ──────────────────────────────────────────────────────
@@ -393,6 +443,31 @@ def _fmt_duration(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     return f"{h}h {m}min" if h > 0 else f"{m}min"
+
+
+def _estimate_traffic_level(weekday, hour, minute):
+    """Stima livello traffico 1-5 in base a giorno (0=lun) e ora."""
+    t = hour + minute / 60.0
+    if weekday < 5:  # Lunedì–Venerdì
+        if   8.0 <= t <  9.5:  return 5
+        if  17.0 <= t < 18.5:  return 5
+        if   7.0 <= t <  8.0:  return 4
+        if  18.5 <= t < 19.5:  return 4
+        if   9.5 <= t < 11.0:  return 3
+        if  12.0 <= t < 14.0:  return 3
+        if  16.0 <= t < 17.0:  return 3
+        if   6.0 <= t <  7.0:  return 2
+        if  11.0 <= t < 12.0:  return 2
+        if  14.0 <= t < 16.0:  return 2
+        if  19.5 <= t < 21.0:  return 2
+        return 1
+    else:  # Sabato–Domenica
+        if  10.0 <= t < 13.0:  return 3
+        if  16.0 <= t < 19.0:  return 3
+        if   8.0 <= t < 10.0:  return 2
+        if  13.0 <= t < 16.0:  return 2
+        if  19.0 <= t < 22.0:  return 2
+        return 1
 
 
 if __name__ == "__main__":

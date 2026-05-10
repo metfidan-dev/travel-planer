@@ -11,6 +11,7 @@ const state = {
     legs: [],
     legLayers: [],
     weatherGroups: [],
+    trafficGroups: [],
     mode: "driving",
     curvePref: 3,
     searchTimer: null,
@@ -292,6 +293,7 @@ function drawLegsOnMap() {
     state.legLayers.forEach((l) => l.remove());
     state.legLayers = [];
     clearAllWeatherMarkers();
+    clearAllTrafficMarkers();
 
     state.legs.forEach((leg) => {
         const layer = L.geoJSON(leg.geometry, {
@@ -359,11 +361,17 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
               onchange="updateLeg(${idx}, 'date', this.value)" />
             <input class="wp-time-input" type="time" value="${leg.time}"
               onchange="updateLeg(${idx}, 'time', this.value)" />
+          </div>
+          <div class="leg-card-btns">
             <button class="btn-weather-seg" onclick="fetchWeatherSegment(${idx})">
-              &#127780; Meteo tratta
+              &#127780; Meteo
+            </button>
+            <button class="btn-traffic-seg" onclick="fetchTrafficSegment(${idx})">
+              &#128678; Traffico
             </button>
           </div>
           <div class="seg-weather-container" id="seg-weather-${idx}"></div>
+          <div class="seg-traffic-container" id="seg-traffic-${idx}"></div>
         `;
         legsList.appendChild(card);
     });
@@ -515,6 +523,131 @@ function clearAllWeatherMarkers() {
     state.weatherGroups = [];
 }
 
+function clearAllTrafficMarkers() {
+    state.trafficGroups.forEach((g) => g?.clearLayers());
+    state.trafficGroups = [];
+}
+
+// ===== TRAFFICO PER TRATTO =====
+async function fetchTrafficSegment(legIdx) {
+    const leg = state.legs[legIdx];
+    if (!leg) return;
+
+    if (!leg.date) {
+        alert(`Seleziona una data di partenza per il Tratto ${legIdx + 1} prima di richiedere il traffico.`);
+        return;
+    }
+
+    const container = document.getElementById(`seg-traffic-${legIdx}`);
+    container.innerHTML = `<div class="seg-loading">&#9203; Stima traffico in corso...</div>`;
+
+    showLoading(true);
+    try {
+        const res = await fetch("/api/traffic-segment", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                geometry: leg.geometry,
+                date: leg.date,
+                time: leg.time || "09:00",
+                duration_sec: leg.duration_sec,
+                distance_km: leg.distance_km,
+            }),
+        });
+        const results = await res.json();
+
+        if (!Array.isArray(results)) {
+            container.innerHTML = `<div class="seg-error">&#9888; ${escHtml(results.error || "Errore sconosciuto")}</div>`;
+            return;
+        }
+
+        renderSegmentTraffic(legIdx, results, leg.time || "09:00", leg.date, leg.color);
+        renderTrafficMarkersOnMap(legIdx, results);
+    } catch (err) {
+        container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
+        console.error(err);
+    } finally { showLoading(false); }
+}
+
+function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor) {
+    const container = document.getElementById(`seg-traffic-${legIdx}`);
+    if (!container) return;
+
+    container.innerHTML = `
+      <div class="seg-weather-header" style="border-left-color:${legColor}">
+        &#128678; Traffico stimato &mdash; partenza ${fmtDate(dateStr)} ore ${departureTime}
+      </div>
+      <div class="seg-weather-row" id="seg-traffic-chips-${legIdx}"></div>
+    `;
+
+    const row = container.querySelector(`#seg-traffic-chips-${legIdx}`);
+    results.forEach((pt) => {
+        const chip = document.createElement("div");
+        chip.className = "seg-traffic-chip";
+        chip.style.borderTopColor = pt.traffic_color;
+
+        chip.innerHTML = `
+          <div class="chip-dist">${pt.dist_km}&nbsp;km</div>
+          <div class="chip-time">&#128336;${pt.estimated_time}</div>
+          <div class="chip-traffic-icon">${pt.traffic_icon}</div>
+          <div class="chip-traffic-label">${escHtml(pt.traffic_label)}</div>
+          ${pt.delay_percent > 0 ? `<div class="chip-delay">+${pt.delay_percent}%</div>` : `<div class="chip-delay">&#10003;</div>`}
+        `;
+        chip.title = [
+            `${pt.weekday_name} ${pt.estimated_time} — km ${pt.dist_km}`,
+            `Traffico: ${pt.traffic_label}`,
+            pt.delay_percent > 0 ? `Possibile ritardo: +${pt.delay_percent}%` : "Nessun ritardo atteso",
+        ].join("\n");
+
+        row.appendChild(chip);
+    });
+}
+
+function makeTrafficIcon(pt) {
+    return L.divIcon({
+        html: `<div style="
+            background:${pt.traffic_color};
+            border:2.5px solid white;
+            border-radius:5px;
+            width:28px;height:28px;
+            display:flex;align-items:center;justify-content:center;
+            font-size:14px;
+            box-shadow:0 2px 6px rgba(0,0,0,.38);
+            cursor:pointer;
+            line-height:1;
+        ">${pt.traffic_icon}</div>`,
+        className: "",
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        popupAnchor: [0, -16],
+    });
+}
+
+function renderTrafficMarkersOnMap(legIdx, results) {
+    if (!state.trafficGroups[legIdx]) {
+        state.trafficGroups[legIdx] = L.layerGroup().addTo(state.map);
+    } else {
+        state.trafficGroups[legIdx].clearLayers();
+    }
+
+    const group = state.trafficGroups[legIdx];
+    // Mostra marker solo dove traffico >= 3 (moderato, intenso, molto intenso)
+    results.filter((r) => r.traffic_level >= 3).forEach((pt) => {
+        const marker = L.marker([pt.lat, pt.lon], { icon: makeTrafficIcon(pt) });
+        marker.bindPopup(`
+          <div style="min-width:150px;font-size:13px">
+            <div style="font-size:11px;color:#888;margin-bottom:4px">
+              &#8987; ${pt.weekday_name} ${pt.estimated_time} &mdash; km ${pt.dist_km}
+            </div>
+            <div style="font-weight:700;font-size:15px">${pt.traffic_icon} ${escHtml(pt.traffic_label)}</div>
+            ${pt.delay_percent > 0
+                ? `<div style="color:#e67e22;margin-top:4px">&#9888; Possibile ritardo +${pt.delay_percent}%</div>`
+                : ""}
+          </div>
+        `);
+        group.addLayer(marker);
+    });
+}
+
 // ===== REVERSE GEOCODE =====
 async function reverseGeocode(lat, lon) {
     try {
@@ -533,6 +666,7 @@ function clearLegs() {
     state.legLayers.forEach((l) => l.remove());
     state.legLayers = [];
     clearAllWeatherMarkers();
+    clearAllTrafficMarkers();
     state.legs = [];
     document.getElementById("legs-panel")?.remove();
 }
