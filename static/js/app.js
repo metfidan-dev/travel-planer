@@ -777,6 +777,15 @@ function curveColor(stars) {
     return colors[(stars || 1) - 1];
 }
 
+// ===== MOBILE VIEW TOGGLE =====
+function toggleMobileView() {
+    const isMapView = document.body.classList.toggle("mobile-map-view");
+    const btn = document.getElementById("mobile-map-toggle");
+    if (btn) btn.innerHTML = isMapView ? "&#9776;&nbsp;Pannello" : "&#128506;&nbsp;Mappa";
+    // Leaflet deve ricalcolare la dimensione quando il container torna visibile
+    if (isMapView && state.map) setTimeout(() => state.map.invalidateSize(), 50);
+}
+
 function escHtml(str) {
     return String(str || "")
         .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");

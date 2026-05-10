@@ -460,6 +460,97 @@ body {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ===== MOBILE TOGGLE BTN (nascosto su desktop) ===== */
+#mobile-map-toggle { display: none; }
+
+/* ===== RESPONSIVE MOBILE ===== */
+@media (max-width: 768px) {
+
+    body { overflow: hidden; }
+
+    #app { display: block; height: 100vh; }
+
+    /* Sidebar: schermo intero di default */
+    #sidebar {
+        width: 100%;
+        min-width: 0;
+        height: 100vh;
+        position: fixed;
+        top: 0; left: 0;
+        z-index: 100;
+    }
+
+    /* Mappa: nascosta di default, visibile con classe mobile-map-view */
+    #map { display: none; width: 100%; height: 100vh; }
+    body.mobile-map-view #sidebar { display: none; }
+    body.mobile-map-view #map    { display: block; }
+
+    /* Toggle flottante */
+    #mobile-map-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        position: fixed;
+        bottom: 22px;
+        right: 18px;
+        z-index: 3000;
+        background: #1a73e8;
+        color: white;
+        border: none;
+        border-radius: 28px;
+        padding: 13px 22px;
+        font-size: 14px;
+        font-weight: 700;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.30);
+        cursor: pointer;
+        transition: background 0.15s, transform 0.1s;
+    }
+    #mobile-map-toggle:active { background: #1557b0; transform: scale(0.96); }
+
+    /* Layer toggle: sopra il bottone mobile, solo in vista mappa */
+    #map-layer-toggle {
+        top: auto;
+        bottom: 82px;
+        right: 12px;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 5px;
+    }
+    body:not(.mobile-map-view) #map-layer-toggle { display: none !important; }
+
+    /* Bottoni più grandi per touch */
+    .mode-btn        { padding: 8px 14px; font-size: 13px; }
+    .primary-btn     { padding: 14px; font-size: 15px; min-height: 50px; }
+    .danger-btn      { padding: 14px; font-size: 14px; min-height: 50px; }
+    .btn-search      { padding: 9px 14px; min-height: 42px; }
+    .btn-delete      { min-width: 38px; min-height: 38px; font-size: 17px; }
+    .btn-weather-seg,
+    .btn-traffic-seg { padding: 9px 10px; font-size: 12px; min-height: 40px; }
+    #add-waypoint-btn { padding: 12px; font-size: 14px; }
+
+    /* iOS: font >= 16px blocca lo zoom automatico al focus */
+    .wp-search-input,
+    .wp-date-input,
+    .wp-time-input,
+    .sample-select   { font-size: 16px !important; }
+    .wp-date-input   { flex: none; width: 100%; }
+    .wp-time-input   { flex: none; width: 100%; }
+    .leg-card-controls { flex-wrap: wrap; }
+
+    /* Chip leggermente più larghi */
+    .seg-weather-chip,
+    .seg-traffic-chip { width: 76px; }
+    .chip-temp        { font-size: 14px; }
+
+    /* Waypoint item più spazioso */
+    .waypoint-item   { padding: 12px; }
+    .wp-search-input { padding: 9px 12px; }
+
+    /* Header sidebar compatto */
+    #sidebar-header   { padding: 10px 14px; }
+    #sidebar-header h1 { font-size: 16px; }
+}
+
 /* ===== MAP LAYER TOGGLE ===== */
 #map-layer-toggle {
     position: fixed;
