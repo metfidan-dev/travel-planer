@@ -336,6 +336,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
           <div class="stat-value">${totalDurFmt}</div>
         </div>
       </div>
+      <button id="export-gmaps-btn" onclick="exportToGoogleMaps()">&#127758; Apri su Google Maps</button>
       <div id="legs-list"></div>
     `;
 
@@ -775,6 +776,27 @@ function curveDots(stars) {
 function curveColor(stars) {
     const colors = ["#95a5a6", "#3498db", "#f39c12", "#e67e22", "#e74c3c"];
     return colors[(stars || 1) - 1];
+}
+
+// ===== EXPORT TO GOOGLE MAPS =====
+function exportToGoogleMaps() {
+    const valid = state.waypoints.filter((w) => w.lat && w.lon);
+    if (valid.length < 2) {
+        alert("Nessun percorso con coordinate disponibile da esportare.");
+        return;
+    }
+
+    const origin      = `${valid[0].lat},${valid[0].lon}`;
+    const destination = `${valid[valid.length - 1].lat},${valid[valid.length - 1].lon}`;
+    const mid         = valid.slice(1, -1).map((w) => `${w.lat},${w.lon}`).join("|");
+
+    const modeMap = { driving: "driving", walking: "walking", cycling: "bicycling", motorcycle: "driving" };
+    const travelmode = modeMap[state.mode] || "driving";
+
+    let url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=${travelmode}`;
+    if (mid) url += `&waypoints=${encodeURIComponent(mid)}`;
+
+    window.open(url, "_blank");
 }
 
 // ===== IMPORT GOOGLE MAPS =====
