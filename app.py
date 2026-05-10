@@ -1,4 +1,5 @@
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify
@@ -6,11 +7,12 @@ import requests
 
 app = Flask(__name__)
 
-NOMINATIM_URL = "https://nominatim.openstreetmap.org"
-OSRM_URL = "http://router.project-osrm.org"
-VALHALLA_URL = "https://valhalla1.openstreetmap.de"
+NOMINATIM_URL  = "https://nominatim.openstreetmap.org"
+OSRM_URL       = "http://router.project-osrm.org"
+VALHALLA_URL   = "https://valhalla1.openstreetmap.de"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1"
-HEADERS = {"User-Agent": "TravelPlannerApp/1.0 (educational project)"}
+TOMTOM_URL     = "https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json"
+HEADERS        = {"User-Agent": "TravelPlannerApp/1.0 (educational project)"}
 
 WMO_DESCRIPTIONS = {
     0: "Cielo sereno", 1: "Prevalentemente sereno", 2: "Parzialmente nuvoloso", 3: "Nuvoloso",
@@ -198,7 +200,11 @@ def weather_segment():
 
 @app.route("/api/traffic-segment", methods=["POST"])
 def traffic_segment():
-    """Stima traffico ogni 20 km lungo un tratto, basata su giorno+ora stimata di passaggio."""
+    """
+    Traffico ogni 20 km lungo un tratto.
+    Se TOMTOM_API_KEY è impostata usa TomTom Traffic Flow (dati reali).
+    Altrimenti usa stima euristica giorno+ora.
+    """
     data = request.get_json() or {}
     geometry     = data.get("geometry")
     date_str     = data.get("date")
@@ -218,24 +224,71 @@ def traffic_segment():
     except ValueError:
         return jsonify({"error": "Formato data/ora non valido (YYYY-MM-DD HH:MM)"}), 400
 
+    api_key = os.environ.get("TOMTOM_API_KEY", "").strip()
     points  = _sample_route_points(coords, interval_km=20)
-    results = []
 
-    for pt in points:
+    def fetch_traffic(pt):
         fraction = min(pt["dist_km"] / distance_km, 1.0) if distance_km > 0 else 0.0
         point_dt = departure + timedelta(seconds=fraction * duration_sec)
-        level    = _estimate_traffic_level(point_dt.weekday(), point_dt.hour, point_dt.minute)
-        results.append({
+        weekday  = point_dt.weekday()
+
+        level  = None
+        source = "heuristic"
+        extra  = {}
+
+        if api_key:
+            try:
+                r = requests.get(
+                    TOMTOM_URL,
+                    params={"point": f"{pt['lat']},{pt['lon']}", "key": api_key},
+                    timeout=8,
+                )
+                r.raise_for_status()
+                fd = r.json().get("flowSegmentData", {})
+                current   = fd.get("currentSpeed", 0)
+                free_flow = fd.get("freeFlowSpeed", 1) or 1
+                closed    = fd.get("roadClosure", False)
+
+                if closed:
+                    level = 5
+                else:
+                    ratio = current / free_flow
+                    if   ratio > 0.85: level = 1
+                    elif ratio > 0.70: level = 2
+                    elif ratio > 0.55: level = 3
+                    elif ratio > 0.40: level = 4
+                    else:              level = 5
+
+                source = "tomtom"
+                extra  = {
+                    "current_speed":   round(current),
+                    "free_flow_speed": round(free_flow),
+                    "flow_ratio":      round(current / free_flow, 2),
+                    "road_closure":    closed,
+                }
+            except Exception:
+                level  = None   # fallback sotto
+                source = "heuristic"
+
+        if level is None:
+            level = _estimate_traffic_level(weekday, point_dt.hour, point_dt.minute)
+
+        return {
             "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
             "estimated_time": point_dt.strftime("%H:%M"),
             "estimated_date": point_dt.strftime("%Y-%m-%d"),
-            "weekday_name":   WEEKDAY_IT[point_dt.weekday()],
+            "weekday_name":   WEEKDAY_IT[weekday],
             "traffic_level":  level,
             "traffic_label":  TRAFFIC_LABELS[level],
             "traffic_color":  TRAFFIC_COLORS[level],
             "traffic_icon":   TRAFFIC_ICONS[level],
             "delay_percent":  TRAFFIC_DELAY[level],
-        })
+            "source":         source,
+            **extra,
+        }
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        results = list(ex.map(fetch_traffic, points))
 
     return jsonify(results)
 

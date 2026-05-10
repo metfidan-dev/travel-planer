@@ -572,9 +572,15 @@ function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor)
     const container = document.getElementById(`seg-traffic-${legIdx}`);
     if (!container) return;
 
+    const usedTomTom = results.some((r) => r.source === "tomtom");
+    const sourceBadge = usedTomTom
+        ? `<span class="traffic-source-badge tomtom">&#128225; TomTom live</span>`
+        : `<span class="traffic-source-badge heuristic">&#128202; Stima statistica</span>`;
+
     container.innerHTML = `
       <div class="seg-weather-header" style="border-left-color:${legColor}">
-        &#128678; Traffico stimato &mdash; partenza ${fmtDate(dateStr)} ore ${departureTime}
+        &#128678; Traffico &mdash; ${fmtDate(dateStr)} ore ${departureTime}
+        ${sourceBadge}
       </div>
       <div class="seg-weather-row" id="seg-traffic-chips-${legIdx}"></div>
     `;
@@ -592,11 +598,17 @@ function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor)
           <div class="chip-traffic-label">${escHtml(pt.traffic_label)}</div>
           ${pt.delay_percent > 0 ? `<div class="chip-delay">+${pt.delay_percent}%</div>` : `<div class="chip-delay">&#10003;</div>`}
         `;
-        chip.title = [
+
+        const tooltipLines = [
             `${pt.weekday_name} ${pt.estimated_time} — km ${pt.dist_km}`,
             `Traffico: ${pt.traffic_label}`,
-            pt.delay_percent > 0 ? `Possibile ritardo: +${pt.delay_percent}%` : "Nessun ritardo atteso",
-        ].join("\n");
+        ];
+        if (pt.source === "tomtom") {
+            tooltipLines.push(`Velocità attuale: ${pt.current_speed} km/h (libera: ${pt.free_flow_speed} km/h)`);
+            tooltipLines.push(`Flusso: ${Math.round(pt.flow_ratio * 100)}% della velocità ideale`);
+        }
+        if (pt.delay_percent > 0) tooltipLines.push(`Possibile ritardo: +${pt.delay_percent}%`);
+        chip.title = tooltipLines.join("\n");
 
         row.appendChild(chip);
     });
@@ -633,12 +645,18 @@ function renderTrafficMarkersOnMap(legIdx, results) {
     // Mostra marker solo dove traffico >= 3 (moderato, intenso, molto intenso)
     results.filter((r) => r.traffic_level >= 3).forEach((pt) => {
         const marker = L.marker([pt.lat, pt.lon], { icon: makeTrafficIcon(pt) });
+        const speedInfo = pt.source === "tomtom"
+            ? `<div style="color:#555;margin-top:3px;font-size:11px">
+                 &#128225; ${pt.current_speed} km/h su ${pt.free_flow_speed} km/h libera
+               </div>`
+            : "";
         marker.bindPopup(`
-          <div style="min-width:150px;font-size:13px">
+          <div style="min-width:155px;font-size:13px">
             <div style="font-size:11px;color:#888;margin-bottom:4px">
               &#8987; ${pt.weekday_name} ${pt.estimated_time} &mdash; km ${pt.dist_km}
             </div>
             <div style="font-weight:700;font-size:15px">${pt.traffic_icon} ${escHtml(pt.traffic_label)}</div>
+            ${speedInfo}
             ${pt.delay_percent > 0
                 ? `<div style="color:#e67e22;margin-top:4px">&#9888; Possibile ritardo +${pt.delay_percent}%</div>`
                 : ""}
