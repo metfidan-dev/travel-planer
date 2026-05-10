@@ -439,6 +439,47 @@ body {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ===== MAP LAYER TOGGLE ===== */
+#map-layer-toggle {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: white;
+    border-radius: 10px;
+    padding: 5px 7px;
+    box-shadow: 0 3px 14px rgba(0,0,0,0.22);
+}
+
+.map-toggle-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #888;
+    margin-right: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.map-toggle-btn {
+    padding: 6px 13px;
+    border: 1.5px solid #e0e0e0;
+    border-radius: 7px;
+    background: white;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: #555;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.map-toggle-btn:hover { background: #f5f5f5; }
+.map-toggle-btn.active { background: #1a73e8; color: white; border-color: #1a73e8; }
+.map-toggle-none { padding: 6px 9px; color: #bbb; border-color: #eee; }
+.map-toggle-none:hover { color: #ea4335; background: #fce8e6; border-color: #ea4335; }
+
 /* ===== UTILITY ===== */
 .hidden { display: none !important; }
 

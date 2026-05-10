@@ -12,6 +12,7 @@ const state = {
     legLayers: [],
     weatherGroups: [],
     trafficGroups: [],
+    mapView: "none",
     mode: "driving",
     curvePref: 3,
     searchTimer: null,
@@ -294,6 +295,8 @@ function drawLegsOnMap() {
     state.legLayers = [];
     clearAllWeatherMarkers();
     clearAllTrafficMarkers();
+    state.mapView = "none";
+    document.getElementById("map-layer-toggle")?.classList.add("hidden");
 
     state.legs.forEach((leg) => {
         const layer = L.geoJSON(leg.geometry, {
@@ -415,6 +418,8 @@ async function fetchWeatherSegment(legIdx) {
 
         renderSegmentWeather(legIdx, results, leg.time || "09:00", leg.date, leg.color);
         renderWeatherMarkersOnMap(legIdx, results, leg.color);
+        setMapView("weather");
+        showMapToggle();
     } catch (err) {
         container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
         console.error(err);
@@ -490,10 +495,10 @@ function makeWeatherIcon(pt) {
 }
 
 function renderWeatherMarkersOnMap(legIdx, results, legColor) {
-    if (!state.weatherGroups[legIdx]) {
-        state.weatherGroups[legIdx] = L.layerGroup().addTo(state.map);
-    } else {
+    if (state.weatherGroups[legIdx]) {
         state.weatherGroups[legIdx].clearLayers();
+    } else {
+        state.weatherGroups[legIdx] = L.layerGroup();
     }
 
     const group = state.weatherGroups[legIdx];
@@ -516,16 +521,42 @@ function renderWeatherMarkersOnMap(legIdx, results, legColor) {
 
         group.addLayer(marker);
     });
+
+    if (state.mapView === "weather") group.addTo(state.map);
 }
 
 function clearAllWeatherMarkers() {
-    state.weatherGroups.forEach((g) => g?.clearLayers());
+    state.weatherGroups.forEach((g) => g?.remove());
     state.weatherGroups = [];
 }
 
 function clearAllTrafficMarkers() {
-    state.trafficGroups.forEach((g) => g?.clearLayers());
+    state.trafficGroups.forEach((g) => g?.remove());
     state.trafficGroups = [];
+}
+
+// ===== TOGGLE LAYER MAPPA =====
+function setMapView(view) {
+    state.mapView = view;
+
+    state.weatherGroups.forEach((g) => {
+        if (!g) return;
+        if (view === "weather") g.addTo(state.map);
+        else g.remove();
+    });
+
+    state.trafficGroups.forEach((g) => {
+        if (!g) return;
+        if (view === "traffic") g.addTo(state.map);
+        else g.remove();
+    });
+
+    document.getElementById("btn-view-weather")?.classList.toggle("active", view === "weather");
+    document.getElementById("btn-view-traffic")?.classList.toggle("active", view === "traffic");
+}
+
+function showMapToggle() {
+    document.getElementById("map-layer-toggle")?.classList.remove("hidden");
 }
 
 // ===== TRAFFICO PER TRATTO =====
@@ -566,6 +597,8 @@ async function fetchTrafficSegment(legIdx) {
 
         renderSegmentTraffic(legIdx, results, leg.time || "09:00", leg.date, leg.color, meta);
         renderTrafficMarkersOnMap(legIdx, results);
+        setMapView("traffic");
+        showMapToggle();
     } catch (err) {
         container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
         console.error(err);
@@ -643,15 +676,14 @@ function makeTrafficIcon(pt) {
 }
 
 function renderTrafficMarkersOnMap(legIdx, results) {
-    if (!state.trafficGroups[legIdx]) {
-        state.trafficGroups[legIdx] = L.layerGroup().addTo(state.map);
-    } else {
+    if (state.trafficGroups[legIdx]) {
         state.trafficGroups[legIdx].clearLayers();
+    } else {
+        state.trafficGroups[legIdx] = L.layerGroup();
     }
 
     const group = state.trafficGroups[legIdx];
-    // Mostra marker solo dove traffico >= 3 (moderato, intenso, molto intenso)
-    results.filter((r) => r.traffic_level >= 3).forEach((pt) => {
+    results.forEach((pt) => {
         const marker = L.marker([pt.lat, pt.lon], { icon: makeTrafficIcon(pt) });
         const speedInfo = pt.source === "tomtom"
             ? `<div style="color:#555;margin-top:3px;font-size:11px">
@@ -672,6 +704,8 @@ function renderTrafficMarkersOnMap(legIdx, results) {
         `);
         group.addLayer(marker);
     });
+
+    if (state.mapView === "traffic") group.addTo(state.map);
 }
 
 // ===== REVERSE GEOCODE =====
@@ -693,8 +727,10 @@ function clearLegs() {
     state.legLayers = [];
     clearAllWeatherMarkers();
     clearAllTrafficMarkers();
+    state.mapView = "none";
     state.legs = [];
     document.getElementById("legs-panel")?.remove();
+    document.getElementById("map-layer-toggle")?.classList.add("hidden");
 }
 
 function clearAll() {

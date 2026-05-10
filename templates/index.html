@@ -59,6 +59,14 @@
     <!-- ===== MAP ===== -->
     <div id="map"></div>
 
+    <!-- ===== TOGGLE LAYER MAPPA ===== -->
+    <div id="map-layer-toggle" class="hidden">
+        <span class="map-toggle-label">Mappa:</span>
+        <button class="map-toggle-btn" id="btn-view-weather" onclick="setMapView('weather')">&#127780; Meteo</button>
+        <button class="map-toggle-btn" id="btn-view-traffic" onclick="setMapView('traffic')">&#128678; Traffico</button>
+        <button class="map-toggle-btn map-toggle-none" onclick="setMapView('none')" title="Nascondi">&#10005;</button>
+    </div>
+
     <!-- ===== SEARCH DROPDOWN ===== -->
     <div id="search-suggestions" class="hidden"></div>
 
