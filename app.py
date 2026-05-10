@@ -1,0 +1,399 @@
+import math
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+from flask import Flask, render_template, request, jsonify
+import requests
+
+app = Flask(__name__)
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org"
+OSRM_URL = "http://router.project-osrm.org"
+VALHALLA_URL = "https://valhalla1.openstreetmap.de"
+OPEN_METEO_URL = "https://api.open-meteo.com/v1"
+HEADERS = {"User-Agent": "TravelPlannerApp/1.0 (educational project)"}
+
+WMO_DESCRIPTIONS = {
+    0: "Cielo sereno", 1: "Prevalentemente sereno", 2: "Parzialmente nuvoloso", 3: "Nuvoloso",
+    45: "Nebbia", 48: "Nebbia con brina",
+    51: "Pioggerellina leggera", 53: "Pioggerellina moderata", 55: "Pioggerellina intensa",
+    56: "Pioggerellina gelata leggera", 57: "Pioggerellina gelata intensa",
+    61: "Pioggia leggera", 63: "Pioggia moderata", 65: "Pioggia intensa",
+    66: "Pioggia gelata leggera", 67: "Pioggia gelata intensa",
+    71: "Neve leggera", 73: "Neve moderata", 75: "Neve intensa", 77: "Neve granulare",
+    80: "Rovesci leggeri", 81: "Rovesci moderati", 82: "Rovesci violenti",
+    85: "Rovesci di neve", 86: "Rovesci di neve intensi",
+    95: "Temporale", 96: "Temporale con grandine", 99: "Temporale con grandine intensa",
+}
+
+WMO_ICONS = {
+    0: "☀️", 1: "🌤️", 2: "⛅", 3: "☁️",
+    45: "🌫️", 48: "🌫️",
+    51: "🌦️", 53: "🌦️", 55: "🌦️", 56: "🌧️", 57: "🌧️",
+    61: "🌧️", 63: "🌧️", 65: "🌧️", 66: "🌨️", 67: "🌨️",
+    71: "❄️", 73: "❄️", 75: "❄️", 77: "🌨️",
+    80: "🌧️", 81: "🌧️", 82: "⛈️",
+    85: "🌨️", 86: "🌨️",
+    95: "⛈️", 96: "⛈️", 99: "⛈️",
+}
+
+# Mapping curva 1-5 → parametri Valhalla moto
+CURVE_SETTINGS = {
+    1: {"use_highways": 1.0, "use_tolls": 0.5, "use_trails": 0.0},
+    2: {"use_highways": 0.7, "use_tolls": 0.5, "use_trails": 0.15},
+    3: {"use_highways": 0.5, "use_tolls": 0.5, "use_trails": 0.25},
+    4: {"use_highways": 0.2, "use_tolls": 0.5, "use_trails": 0.4},
+    5: {"use_highways": 0.0, "use_tolls": 0.5, "use_trails": 0.5},
+}
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/geocode", methods=["POST"])
+def geocode():
+    query = (request.get_json() or {}).get("query", "").strip()
+    if not query:
+        return jsonify({"error": "Query vuota"}), 400
+    try:
+        r = requests.get(
+            f"{NOMINATIM_URL}/search",
+            params={"q": query, "format": "json", "limit": 6, "addressdetails": 1},
+            headers=HEADERS, timeout=10,
+        )
+        r.raise_for_status()
+        return jsonify(r.json())
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reverse-geocode", methods=["POST"])
+def reverse_geocode():
+    data = request.get_json() or {}
+    try:
+        r = requests.get(
+            f"{NOMINATIM_URL}/reverse",
+            params={"lat": data["lat"], "lon": data["lon"], "format": "json"},
+            headers=HEADERS, timeout=10,
+        )
+        r.raise_for_status()
+        return jsonify(r.json())
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/route", methods=["POST"])
+def calculate_route():
+    data = request.get_json() or {}
+    waypoints = data.get("waypoints", [])
+    profile = data.get("profile", "driving")
+    curves = int(data.get("curves", 3))
+
+    if len(waypoints) < 2:
+        return jsonify({"error": "Servono almeno 2 tappe"}), 400
+
+    try:
+        if profile == "motorcycle":
+            result = _call_valhalla(waypoints, curves)
+        else:
+            result = _call_osrm(waypoints, profile)
+        return jsonify(result)
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 500
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/weather-segment", methods=["POST"])
+def weather_segment():
+    """
+    Recupera meteo ogni 20 km lungo un tratto.
+    Per ogni punto calcola l'orario stimato di passaggio in base alla partenza
+    e alla durata totale del tratto (proporzione lineare sulla distanza).
+    """
+    data = request.get_json() or {}
+    geometry = data.get("geometry")
+    date_str = data.get("date")
+    time_str = data.get("time", "09:00")
+    duration_sec = float(data.get("duration_sec", 0))
+    distance_km = float(data.get("distance_km", 1))  # evita divisione per zero
+
+    if not geometry or not date_str:
+        return jsonify({"error": "geometry e date sono obbligatori"}), 400
+
+    coords = geometry.get("coordinates", [])
+    if len(coords) < 2:
+        return jsonify({"error": "Geometria non valida"}), 400
+
+    try:
+        departure = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return jsonify({"error": "Formato data/ora non valido (YYYY-MM-DD HH:MM)"}), 400
+
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if departure.date() < today.date():
+        return jsonify({"error": "Data nel passato"}), 400
+
+    end_dt = departure + timedelta(seconds=max(duration_sec, 0))
+    end_days = (end_dt.replace(hour=0, minute=0, second=0, microsecond=0) - today).days
+    if end_days > 16:
+        return jsonify({"error": "Il viaggio supera il limite di previsioni di 16 giorni"}), 400
+
+    points = _sample_route_points(coords, interval_km=20)
+
+    def fetch(pt):
+        fraction = min(pt["dist_km"] / distance_km, 1.0) if distance_km > 0 else 0.0
+        offset = timedelta(seconds=fraction * duration_sec)
+        point_dt = departure + offset
+        pt_date = point_dt.strftime("%Y-%m-%d")
+        pt_hour = point_dt.hour
+
+        try:
+            r = requests.get(
+                f"{OPEN_METEO_URL}/forecast",
+                params={
+                    "latitude": pt["lat"], "longitude": pt["lon"],
+                    "hourly": ("temperature_2m,apparent_temperature,precipitation_probability,"
+                               "precipitation,weathercode,windspeed_10m,winddirection_10m,cloudcover"),
+                    "start_date": pt_date, "end_date": pt_date,
+                    "timezone": "auto", "wind_speed_unit": "kmh",
+                },
+                timeout=12,
+            )
+            r.raise_for_status()
+            h = r.json().get("hourly", {})
+            if pt_hour >= len(h.get("temperature_2m", [])):
+                return None
+            code = h["weathercode"][pt_hour]
+            return {
+                "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
+                "estimated_time": point_dt.strftime("%H:%M"),
+                "estimated_date": pt_date,
+                "temperature": round(h["temperature_2m"][pt_hour], 1),
+                "apparent_temperature": round(h["apparent_temperature"][pt_hour], 1),
+                "precipitation_probability": h["precipitation_probability"][pt_hour],
+                "precipitation": h["precipitation"][pt_hour],
+                "weathercode": code,
+                "weather_description": WMO_DESCRIPTIONS.get(code, f"Codice {code}"),
+                "weather_icon": WMO_ICONS.get(code, "🌡️"),
+                "windspeed": round(h["windspeed_10m"][pt_hour], 1),
+                "winddirection": h["winddirection_10m"][pt_hour],
+                "cloudcover": h["cloudcover"][pt_hour],
+            }
+        except Exception as exc:
+            return {"lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"], "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        results = list(ex.map(fetch, points))
+
+    return jsonify([r for r in results if r is not None])
+
+
+# ───── routing helpers ──────────────────────────────────────────────────────
+
+def _call_osrm(waypoints, profile):
+    coords = ";".join(f"{w['lon']},{w['lat']}" for w in waypoints)
+    r = requests.get(
+        f"{OSRM_URL}/route/v1/{profile}/{coords}",
+        params={"overview": "full", "geometries": "geojson", "steps": "true"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    result = r.json()
+
+    if result.get("code") != "Ok":
+        raise ValueError("Impossibile calcolare il percorso")
+
+    route = result["routes"][0]
+    legs = []
+    for leg in route["legs"]:
+        leg_coords = []
+        for step in leg.get("steps", []):
+            sc = step["geometry"]["coordinates"]
+            if not sc:
+                continue
+            if leg_coords and sc[0] == leg_coords[-1]:
+                leg_coords.extend(sc[1:])
+            else:
+                leg_coords.extend(sc)
+        c_score, c_stars, c_label = _calculate_curvature(leg_coords)
+        legs.append({
+            "distance_km": round(leg["distance"] / 1000, 1),
+            "duration_sec": round(leg["duration"]),
+            "duration_formatted": _fmt_duration(leg["duration"]),
+            "geometry": {"type": "LineString", "coordinates": leg_coords},
+            "curvature_score": round(c_score, 1),
+            "curvature_stars": c_stars,
+            "curvature_label": c_label,
+        })
+    return {
+        "legs": legs,
+        "total_distance_km": round(route["distance"] / 1000, 1),
+        "total_duration_formatted": _fmt_duration(route["duration"]),
+    }
+
+
+def _call_valhalla(waypoints, curves):
+    """Routing moto via Valhalla con preferenza curve 1-5."""
+    curves = max(1, min(5, int(curves)))
+    body = {
+        "locations": [{"lon": w["lon"], "lat": w["lat"]} for w in waypoints],
+        "costing": "motorcycle",
+        "costing_options": {"motorcycle": CURVE_SETTINGS[curves]},
+        "units": "km",
+    }
+    r = requests.post(
+        f"{VALHALLA_URL}/route",
+        json=body,
+        headers={"Content-Type": "application/json"},
+        timeout=45,
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    trip = data.get("trip", {})
+    if trip.get("status", 0) != 0 or "error" in data:
+        raise ValueError(data.get("error", "Errore Valhalla sconosciuto"))
+
+    legs = []
+    for leg in trip["legs"]:
+        coords = _decode_polyline6(leg["shape"])
+        c_score, c_stars, c_label = _calculate_curvature(coords)
+        legs.append({
+            "distance_km": round(leg["summary"]["length"], 1),
+            "duration_sec": round(leg["summary"]["time"]),
+            "duration_formatted": _fmt_duration(leg["summary"]["time"]),
+            "geometry": {"type": "LineString", "coordinates": coords},
+            "curvature_score": round(c_score, 1),
+            "curvature_stars": c_stars,
+            "curvature_label": c_label,
+        })
+    return {
+        "legs": legs,
+        "total_distance_km": round(trip["summary"]["length"], 1),
+        "total_duration_formatted": _fmt_duration(trip["summary"]["time"]),
+    }
+
+
+def _decode_polyline6(encoded):
+    """Decodifica polyline Valhalla (precision 6) → lista [lon, lat] (GeoJSON)."""
+    coords = []
+    index = lat = lng = 0
+    while index < len(encoded):
+        for is_lat in (True, False):
+            result = shift = 0
+            while True:
+                b = ord(encoded[index]) - 63
+                index += 1
+                result |= (b & 0x1f) << shift
+                shift += 5
+                if b < 32:
+                    break
+            delta = ~(result >> 1) if (result & 1) else (result >> 1)
+            if is_lat:
+                lat += delta
+            else:
+                lng += delta
+        coords.append([lng / 1e6, lat / 1e6])
+    return coords
+
+
+# ───── geometry helpers ─────────────────────────────────────────────────────
+
+def _bearing(lon1, lat1, lon2, lat2):
+    """Angolo di rotta da punto 1 a punto 2 in gradi [0-360]."""
+    lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    x = math.sin(dlon) * math.cos(lat2r)
+    y = math.cos(lat1r) * math.sin(lat2r) - math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def _calculate_curvature(coords):
+    """
+    Misura la sinuosità reale del percorso come cambio totale di direzione (gradi) per km.
+    Restituisce (score, stelle 1-5, etichetta).
+    """
+    if len(coords) < 3:
+        return 0.0, 1, "Rettilineo"
+
+    total_angle = 0.0
+    total_dist = 0.0
+
+    for i in range(1, len(coords) - 1):
+        p0, p1, p2 = coords[i - 1], coords[i], coords[i + 1]
+        seg = _haversine(p0[0], p0[1], p1[0], p1[1])
+        if seg < 0.005:          # ignora segmenti < 5 m (evita noise GPS)
+            continue
+        b1 = _bearing(p0[0], p0[1], p1[0], p1[1])
+        b2 = _bearing(p1[0], p1[1], p2[0], p2[1])
+        delta = abs(b2 - b1)
+        if delta > 180:
+            delta = 360 - delta
+        total_angle += delta
+        total_dist += seg
+
+    if total_dist < 0.1:
+        return 0.0, 1, "Rettilineo"
+
+    score = total_angle / total_dist   # gradi / km
+
+    if score < 5:
+        return score, 1, "Quasi rettilineo"
+    elif score < 15:
+        return score, 2, "Poco curvato"
+    elif score < 35:
+        return score, 3, "Moderatamente curvato"
+    elif score < 70:
+        return score, 4, "Molto curvato"
+    else:
+        return score, 5, "Estremamente curvato"
+
+
+def _haversine(lon1, lat1, lon2, lat2):
+    R = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi, dlam = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return R * 2 * math.asin(math.sqrt(min(a, 1.0)))
+
+
+def _sample_route_points(coords, interval_km=20):
+    """Campiona punti ogni interval_km lungo la polilinea → lista {lat, lon, dist_km}."""
+    if len(coords) < 2:
+        return [{"lat": coords[0][1], "lon": coords[0][0], "dist_km": 0.0}]
+
+    result = [{"lat": coords[0][1], "lon": coords[0][0], "dist_km": 0.0}]
+    accumulated = 0.0
+    next_target = float(interval_km)
+
+    for i in range(1, len(coords)):
+        p0, p1 = coords[i - 1], coords[i]
+        seg_km = _haversine(p0[0], p0[1], p1[0], p1[1])
+
+        while seg_km > 0 and next_target <= accumulated + seg_km:
+            frac = (next_target - accumulated) / seg_km
+            lon = p0[0] + frac * (p1[0] - p0[0])
+            lat = p0[1] + frac * (p1[1] - p0[1])
+            result.append({"lat": lat, "lon": lon, "dist_km": round(next_target, 1)})
+            next_target += interval_km
+
+        accumulated += seg_km
+
+    last = {"lat": coords[-1][1], "lon": coords[-1][0], "dist_km": round(accumulated, 1)}
+    prev = result[-1]
+    if abs(prev["lat"] - last["lat"]) > 1e-6 or abs(prev["lon"] - last["lon"]) > 1e-6:
+        result.append(last)
+
+    return result
+
+
+def _fmt_duration(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    return f"{h}h {m}min" if h > 0 else f"{m}min"
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)

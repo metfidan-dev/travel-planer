@@ -1,0 +1,580 @@
+"use strict";
+
+const LEG_COLORS = ["#e74c3c", "#27ae60", "#8e44ad", "#e67e22", "#16a085", "#2980b9", "#c0392b", "#f39c12"];
+
+let wpCounter = 0;
+
+const state = {
+    map: null,
+    waypoints: [],
+    markers: {},
+    legs: [],
+    legLayers: [],
+    weatherGroups: [],
+    mode: "driving",
+    curvePref: 3,
+    searchTimer: null,
+};
+
+// ===== INIT =====
+document.addEventListener("DOMContentLoaded", () => {
+    initMap();
+    bindControls();
+    addWaypoint();
+    addWaypoint();
+});
+
+function initMap() {
+    state.map = L.map("map", { center: [44, 12], zoom: 5 });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19,
+    }).addTo(state.map);
+    state.map.on("click", onMapClick);
+}
+
+function bindControls() {
+    document.getElementById("add-waypoint-btn").addEventListener("click", () => addWaypoint());
+    document.getElementById("calculate-route-btn").addEventListener("click", calculateRoute);
+    document.getElementById("clear-route-btn").addEventListener("click", clearAll);
+
+    document.querySelectorAll(".mode-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
+            btn.classList.add("active");
+            state.mode = btn.dataset.mode;
+            // Mostra/nasconde il controllo curve solo per la moto
+            document.getElementById("curves-control").classList.toggle("hidden", state.mode !== "motorcycle");
+        });
+    });
+
+    document.addEventListener("click", (e) => {
+        if (!e.target.closest(".waypoint-search") && !e.target.closest("#search-suggestions")) {
+            hideSuggestions();
+        }
+    });
+}
+
+function onCurvesChange(val) {
+    state.curvePref = parseInt(val, 10);
+    document.getElementById("curves-badge").textContent = `${val} / 5`;
+}
+
+// ===== WAYPOINTS =====
+function addWaypoint(name = "", lat = null, lon = null) {
+    const id = ++wpCounter;
+    state.waypoints.push({ id, name, lat, lon });
+    renderWaypoints();
+    if (lat && lon) syncMarker(id);
+    return id;
+}
+
+function removeWaypoint(id) {
+    removeMarker(id);
+    state.waypoints = state.waypoints.filter((w) => w.id !== id);
+    renderWaypoints();
+    clearLegs();
+}
+
+function updateWp(id, patch) {
+    const wp = state.waypoints.find((w) => w.id === id);
+    if (wp) Object.assign(wp, patch);
+}
+
+function renderWaypoints() {
+    const list = document.getElementById("waypoints-list");
+    list.innerHTML = "";
+    const count = state.waypoints.length;
+
+    state.waypoints.forEach((wp, idx) => {
+        const isLast = idx === count - 1;
+        const label = idx === 0 ? "Partenza" : isLast ? "Arrivo" : `Tappa ${idx}`;
+        const dotColor = !isLast ? LEG_COLORS[idx % LEG_COLORS.length] : "#ea4335";
+
+        const div = document.createElement("div");
+        div.className = "waypoint-item";
+        div.dataset.wpid = wp.id;
+
+        div.innerHTML = `
+          <div class="waypoint-header">
+            <div class="waypoint-badge${isLast && idx > 0 ? " is-last" : ""}">${idx + 1}</div>
+            <div class="wp-leg-dot" style="background:${dotColor}"></div>
+            <span class="waypoint-label">${escHtml(wp.name || label)}</span>
+            ${count > 2 ? `<button class="btn-delete" onclick="removeWaypoint(${wp.id})">&#10005;</button>` : ""}
+          </div>
+          <div class="waypoint-search">
+            <input class="wp-search-input" type="text" placeholder="Cerca un luogo..."
+              value="${escHtml(wp.name)}" data-wpid="${wp.id}"
+              oninput="onSearchInput(this)" onfocus="onSearchFocus(${wp.id})" />
+            <button class="btn-search" onclick="triggerSearch(${wp.id})">&#128269;</button>
+          </div>
+        `;
+        list.appendChild(div);
+    });
+
+    refreshAllMarkers();
+}
+
+// ===== MARKERS =====
+function makeIcon(idx, total) {
+    const isLast = idx === total - 1 && total > 1;
+    const bg = isLast ? "#ea4335" : "#1a73e8";
+    return L.divIcon({
+        html: `<div style="background:${bg};color:white;width:28px;height:28px;border-radius:50% 50% 50% 0;
+                transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;
+                font-size:11px;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,.3)">
+                <span style="transform:rotate(45deg)">${idx + 1}</span></div>`,
+        className: "",
+        iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -28],
+    });
+}
+
+function syncMarker(id) {
+    const wp = state.waypoints.find((w) => w.id === id);
+    if (!wp || !wp.lat) return;
+    const idx = state.waypoints.indexOf(wp);
+    const total = state.waypoints.length;
+    const popup = `<strong>${escHtml(wp.name || `Tappa ${idx + 1}`)}</strong>`;
+
+    if (state.markers[id]) {
+        state.markers[id].setLatLng([wp.lat, wp.lon]);
+        state.markers[id].setIcon(makeIcon(idx, total));
+        state.markers[id].getPopup()?.setContent(popup);
+    } else {
+        const m = L.marker([wp.lat, wp.lon], { icon: makeIcon(idx, total), draggable: true })
+            .bindPopup(popup).addTo(state.map);
+        m.on("dragend", async (e) => {
+            const { lat, lng } = e.target.getLatLng();
+            const name = await reverseGeocode(lat, lng);
+            updateWp(id, { lat, lon: lng, name });
+            renderWaypoints();
+            clearLegs();
+        });
+        state.markers[id] = m;
+    }
+}
+
+function removeMarker(id) {
+    if (state.markers[id]) { state.markers[id].remove(); delete state.markers[id]; }
+}
+
+function refreshAllMarkers() {
+    const ids = new Set(state.waypoints.map((w) => w.id));
+    Object.keys(state.markers).forEach((k) => { if (!ids.has(Number(k))) removeMarker(Number(k)); });
+    state.waypoints.forEach((wp) => { if (wp.lat) syncMarker(wp.id); });
+}
+
+// ===== MAP CLICK =====
+async function onMapClick(e) {
+    const empty = state.waypoints.find((w) => !w.lat);
+    if (!empty) return;
+    showLoading(true);
+    try {
+        const { lat, lng } = e.latlng;
+        const name = await reverseGeocode(lat, lng);
+        updateWp(empty.id, { lat, lon: lng, name });
+        const input = document.querySelector(`.wp-search-input[data-wpid="${empty.id}"]`);
+        if (input) input.value = name;
+        const lbl = document.querySelector(`.waypoint-item[data-wpid="${empty.id}"] .waypoint-label`);
+        if (lbl) lbl.textContent = name;
+        syncMarker(empty.id);
+        state.map.setView([lat, lng], Math.max(state.map.getZoom(), 10));
+    } finally { showLoading(false); }
+}
+
+// ===== SEARCH =====
+function onSearchFocus(id) { /* reserved */ }
+
+function onSearchInput(input) {
+    const id = Number(input.dataset.wpid);
+    updateWp(id, { name: input.value, lat: null, lon: null });
+    removeMarker(id);
+    clearLegs();
+    clearTimeout(state.searchTimer);
+    if (input.value.length < 3) { hideSuggestions(); return; }
+    state.searchTimer = setTimeout(() => doSearch(input.value, id, input), 380);
+}
+
+function triggerSearch(id) {
+    const input = document.querySelector(`.wp-search-input[data-wpid="${id}"]`);
+    if (input && input.value.length >= 2) doSearch(input.value, id, input);
+}
+
+async function doSearch(query, id, inputEl) {
+    try {
+        const res = await fetch("/api/geocode", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query }),
+        });
+        const results = await res.json();
+        showSuggestions(Array.isArray(results) ? results : [], id, inputEl);
+    } catch (err) { console.error("Geocoding error:", err); }
+}
+
+function showSuggestions(results, id, inputEl) {
+    const box = document.getElementById("search-suggestions");
+    box.innerHTML = "";
+    if (!results.length) { hideSuggestions(); return; }
+    const rect = inputEl.getBoundingClientRect();
+    box.style.top = `${rect.bottom + 4}px`;
+    box.style.left = `${rect.left}px`;
+    box.style.width = `${rect.width + 46}px`;
+    box.classList.remove("hidden");
+    results.slice(0, 6).forEach((r) => {
+        const item = document.createElement("div");
+        item.className = "suggestion-item";
+        item.textContent = r.display_name;
+        item.addEventListener("click", () => { selectPlace(id, r); hideSuggestions(); });
+        box.appendChild(item);
+    });
+}
+
+function hideSuggestions() {
+    document.getElementById("search-suggestions").classList.add("hidden");
+}
+
+function selectPlace(id, result) {
+    const lat = parseFloat(result.lat);
+    const lon = parseFloat(result.lon);
+    const name = result.display_name.split(",").slice(0, 2).join(", ").trim();
+    updateWp(id, { lat, lon, name });
+    const input = document.querySelector(`.wp-search-input[data-wpid="${id}"]`);
+    if (input) input.value = name;
+    const lbl = document.querySelector(`.waypoint-item[data-wpid="${id}"] .waypoint-label`);
+    if (lbl) lbl.textContent = name;
+    syncMarker(id);
+    state.map.setView([lat, lon], Math.max(state.map.getZoom(), 10));
+    clearLegs();
+}
+
+// ===== ROUTING =====
+async function calculateRoute() {
+    const valid = state.waypoints.filter((w) => w.lat && w.lon);
+    if (valid.length < 2) {
+        alert("Aggiungi almeno 2 tappe con posizione valida prima di calcolare il percorso.");
+        return;
+    }
+    showLoading(true);
+    try {
+        const res = await fetch("/api/route", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                waypoints: valid.map((w) => ({ lat: w.lat, lon: w.lon })),
+                profile: state.mode,
+                curves: state.curvePref,
+            }),
+        });
+        const data = await res.json();
+        if (data.error) { alert("Errore percorso: " + data.error); return; }
+
+        state.legs = data.legs.map((leg, i) => ({
+            ...leg,
+            color: LEG_COLORS[i % LEG_COLORS.length],
+            fromName: valid[i]?.name || `Tappa ${i + 1}`,
+            toName: valid[i + 1]?.name || `Tappa ${i + 2}`,
+            date: "",
+            time: "09:00",
+        }));
+
+        drawLegsOnMap();
+        buildLegsPanel(data.total_distance_km, data.total_duration_formatted);
+
+        const allLL = state.legs.flatMap((l) => l.geometry.coordinates.map(([ln, lt]) => [lt, ln]));
+        if (allLL.length) state.map.fitBounds(L.latLngBounds(allLL), { padding: [30, 30] });
+    } catch (err) {
+        alert("Errore di connessione durante il calcolo del percorso.");
+        console.error(err);
+    } finally { showLoading(false); }
+}
+
+// ===== MAPPA: POLILINEE COLORATE =====
+function drawLegsOnMap() {
+    state.legLayers.forEach((l) => l.remove());
+    state.legLayers = [];
+    clearAllWeatherMarkers();
+
+    state.legs.forEach((leg) => {
+        const layer = L.geoJSON(leg.geometry, {
+            style: { color: leg.color, weight: 5, opacity: 0.88 },
+        }).addTo(state.map);
+        state.legLayers.push(layer);
+    });
+}
+
+// ===== SIDEBAR: PANNELLO TRATTI =====
+function buildLegsPanel(totalDistKm, totalDurFmt) {
+    document.getElementById("legs-panel")?.remove();
+
+    const panel = document.createElement("div");
+    panel.id = "legs-panel";
+    panel.className = "panel";
+
+    const motoNote = state.mode === "motorcycle"
+        ? `<div class="moto-info">&#127949; Moto &mdash; Preferenza curve: <strong>${state.curvePref}/5</strong></div>`
+        : "";
+
+    panel.innerHTML = `
+      <div class="panel-title">Percorso calcolato</div>
+      ${motoNote}
+      <div id="summary-stats">
+        <div class="stat-box">
+          <div class="stat-label">Distanza totale</div>
+          <div class="stat-value">${totalDistKm} km</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Tempo totale</div>
+          <div class="stat-value">${totalDurFmt}</div>
+        </div>
+      </div>
+      <div id="legs-list"></div>
+    `;
+
+    document.getElementById("sidebar-body").appendChild(panel);
+    const legsList = panel.querySelector("#legs-list");
+
+    state.legs.forEach((leg, idx) => {
+        const from = leg.fromName.split(",")[0];
+        const to = leg.toName.split(",")[0];
+
+        const card = document.createElement("div");
+        card.className = "leg-card";
+        card.id = `leg-card-${idx}`;
+        card.style.borderLeftColor = leg.color;
+
+        card.innerHTML = `
+          <div class="leg-card-header">
+            <div class="leg-color-dot" style="background:${leg.color}"></div>
+            <span class="leg-card-title">Tratto ${idx + 1}: ${escHtml(from)} &#8594; ${escHtml(to)}</span>
+          </div>
+          <div class="leg-card-stats">${leg.distance_km} km &middot; ${leg.duration_formatted}</div>
+          <div class="leg-curvature" title="Sinuosità: ${leg.curvature_score} °/km">
+            <span class="curve-dots" style="color:${curveColor(leg.curvature_stars)}">${curveDots(leg.curvature_stars)}</span>
+            <span class="curve-label">${escHtml(leg.curvature_label || "—")}</span>
+            <span class="curve-score">${leg.curvature_score || 0} °/km</span>
+          </div>
+          <div class="leg-datetime-label">Data e ora di partenza del tratto:</div>
+          <div class="leg-card-controls">
+            <input class="wp-date-input" type="date" value="${leg.date}"
+              min="${todayStr()}" max="${maxDateStr()}"
+              onchange="updateLeg(${idx}, 'date', this.value)" />
+            <input class="wp-time-input" type="time" value="${leg.time}"
+              onchange="updateLeg(${idx}, 'time', this.value)" />
+            <button class="btn-weather-seg" onclick="fetchWeatherSegment(${idx})">
+              &#127780; Meteo tratta
+            </button>
+          </div>
+          <div class="seg-weather-container" id="seg-weather-${idx}"></div>
+        `;
+        legsList.appendChild(card);
+    });
+}
+
+function updateLeg(idx, key, value) {
+    if (state.legs[idx]) state.legs[idx][key] = value;
+}
+
+// ===== METEO PER TRATTO CON ORARIO STIMATO =====
+async function fetchWeatherSegment(legIdx) {
+    const leg = state.legs[legIdx];
+    if (!leg) return;
+
+    if (!leg.date) {
+        alert(`Seleziona una data di partenza per il Tratto ${legIdx + 1} prima di richiedere le previsioni.`);
+        return;
+    }
+
+    const container = document.getElementById(`seg-weather-${legIdx}`);
+    container.innerHTML = `<div class="seg-loading">&#9203; Recupero previsioni in corso...</div>`;
+
+    showLoading(true);
+    try {
+        const res = await fetch("/api/weather-segment", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                geometry: leg.geometry,
+                date: leg.date,
+                time: leg.time || "09:00",
+                duration_sec: leg.duration_sec,
+                distance_km: leg.distance_km,
+            }),
+        });
+        const results = await res.json();
+
+        if (!Array.isArray(results)) {
+            container.innerHTML = `<div class="seg-error">&#9888; ${escHtml(results.error || "Errore sconosciuto")}</div>`;
+            return;
+        }
+
+        renderSegmentWeather(legIdx, results, leg.time || "09:00", leg.date, leg.color);
+        renderWeatherMarkersOnMap(legIdx, results, leg.color);
+    } catch (err) {
+        container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
+        console.error(err);
+    } finally { showLoading(false); }
+}
+
+// ===== CHIP METEO NEL PANNELLO =====
+function renderSegmentWeather(legIdx, results, departureTime, dateStr, legColor) {
+    const container = document.getElementById(`seg-weather-${legIdx}`);
+    if (!container) return;
+
+    const valid = results.filter((r) => !r.error);
+    const errCount = results.length - valid.length;
+
+    if (!valid.length) {
+        container.innerHTML = `<div class="seg-error">Nessun dato disponibile per questa tratta</div>`;
+        return;
+    }
+
+    container.innerHTML = `
+      <div class="seg-weather-header" style="border-left-color:${legColor}">
+        Partenza ${fmtDate(dateStr)} ore ${departureTime} &mdash; ${valid.length} punti ogni ~20 km
+        ${errCount > 0 ? `<span class="seg-warn">(${errCount} non disp.)</span>` : ""}
+      </div>
+      <div class="seg-weather-row" id="seg-chips-${legIdx}"></div>
+    `;
+
+    const row = container.querySelector(`#seg-chips-${legIdx}`);
+    valid.forEach((pt) => {
+        const chip = document.createElement("div");
+        chip.className = "seg-weather-chip";
+        chip.style.borderTopColor = tempColor(pt.temperature);
+
+        chip.innerHTML = `
+          <div class="chip-dist">${pt.dist_km}&nbsp;km</div>
+          <div class="chip-time">&#128336;${pt.estimated_time}</div>
+          <div class="chip-icon">${pt.weather_icon}</div>
+          <div class="chip-temp">${pt.temperature}°C</div>
+          <div class="chip-precip">&#128167;${pt.precipitation_probability}%</div>
+          <div class="chip-wind">&#128168;${pt.windspeed}</div>
+        `;
+        chip.title = [
+            `Stima passaggio: ${pt.estimated_time} (${fmtDate(pt.estimated_date)})`,
+            pt.weather_description,
+            `Temp: ${pt.temperature}°C (perc. ${pt.apparent_temperature}°C)`,
+            `Vento: ${pt.windspeed} km/h ${compassDir(pt.winddirection)}`,
+            `Pioggia: ${pt.precipitation_probability}%`,
+        ].join("\n");
+
+        row.appendChild(chip);
+    });
+}
+
+// ===== ICONE METEO CON EMOJI SULLA MAPPA =====
+function makeWeatherIcon(pt) {
+    return L.divIcon({
+        html: `<div style="
+            background:${tempColor(pt.temperature)};
+            border:2.5px solid white;
+            border-radius:50%;
+            width:28px;height:28px;
+            display:flex;align-items:center;justify-content:center;
+            font-size:15px;
+            box-shadow:0 2px 6px rgba(0,0,0,.38);
+            cursor:pointer;
+            line-height:1;
+        ">${pt.weather_icon}</div>`,
+        className: "",
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        popupAnchor: [0, -16],
+    });
+}
+
+function renderWeatherMarkersOnMap(legIdx, results, legColor) {
+    if (!state.weatherGroups[legIdx]) {
+        state.weatherGroups[legIdx] = L.layerGroup().addTo(state.map);
+    } else {
+        state.weatherGroups[legIdx].clearLayers();
+    }
+
+    const group = state.weatherGroups[legIdx];
+    results.filter((r) => !r.error).forEach((pt) => {
+        const marker = L.marker([pt.lat, pt.lon], { icon: makeWeatherIcon(pt) });
+
+        marker.bindPopup(`
+          <div style="min-width:160px;font-size:13px">
+            <div style="font-size:11px;color:#888;margin-bottom:4px">
+              &#8987; ${pt.estimated_time} &mdash; km ${pt.dist_km} dal inizio tratta
+            </div>
+            <div style="font-weight:700;font-size:16px">${pt.weather_icon} ${pt.temperature}°C</div>
+            <div style="color:#555;margin-bottom:5px">${escHtml(pt.weather_description)}</div>
+            <div>Percepita: ${pt.apparent_temperature}°C</div>
+            <div>&#128167; Pioggia: ${pt.precipitation_probability}%</div>
+            <div>&#128168; Vento: ${pt.windspeed} km/h ${compassDir(pt.winddirection)}</div>
+            <div>&#9729; Nuvole: ${pt.cloudcover}%</div>
+          </div>
+        `);
+
+        group.addLayer(marker);
+    });
+}
+
+function clearAllWeatherMarkers() {
+    state.weatherGroups.forEach((g) => g?.clearLayers());
+    state.weatherGroups = [];
+}
+
+// ===== REVERSE GEOCODE =====
+async function reverseGeocode(lat, lon) {
+    try {
+        const res = await fetch("/api/reverse-geocode", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ lat, lon }),
+        });
+        const data = await res.json();
+        if (data.display_name) return data.display_name.split(",").slice(0, 2).join(", ").trim();
+    } catch (e) { console.warn("Reverse geocode failed:", e); }
+    return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+}
+
+// ===== CLEAR =====
+function clearLegs() {
+    state.legLayers.forEach((l) => l.remove());
+    state.legLayers = [];
+    clearAllWeatherMarkers();
+    state.legs = [];
+    document.getElementById("legs-panel")?.remove();
+}
+
+function clearAll() {
+    if (!confirm("Vuoi davvero azzerare tutto il percorso?")) return;
+    Object.keys(state.markers).forEach((k) => removeMarker(Number(k)));
+    clearLegs();
+    state.waypoints = [];
+    addWaypoint();
+    addWaypoint();
+}
+
+// ===== UTILS =====
+function showLoading(on) {
+    document.getElementById("loading").classList.toggle("hidden", !on);
+}
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function maxDateStr() { const d = new Date(); d.setDate(d.getDate() + 16); return d.toISOString().slice(0, 10); }
+function fmtDate(s) { if (!s) return ""; const [y, m, d] = s.split("-"); return `${d}/${m}/${y}`; }
+function compassDir(deg) {
+    const dirs = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
+    return dirs[Math.round((deg || 0) / 45) % 8];
+}
+function tempColor(temp) {
+    if (temp < 0)  return "#74b9ff";
+    if (temp < 10) return "#55efc4";
+    if (temp < 20) return "#fdcb6e";
+    if (temp < 30) return "#e17055";
+    return "#d63031";
+}
+function curveDots(stars) {
+    const s = stars || 1;
+    return "●".repeat(s) + "○".repeat(5 - s);
+}
+
+function curveColor(stars) {
+    const colors = ["#95a5a6", "#3498db", "#f39c12", "#e67e22", "#e74c3c"];
+    return colors[(stars || 1) - 1];
+}
+
+function escHtml(str) {
+    return String(str || "")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}

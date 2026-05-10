@@ -1,0 +1,400 @@
+/* ===== RESET & BASE ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    height: 100vh;
+    overflow: hidden;
+    color: #202124;
+}
+
+#app { display: flex; height: 100vh; }
+
+/* ===== SIDEBAR ===== */
+#sidebar {
+    width: 400px;
+    min-width: 400px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    box-shadow: 2px 0 10px rgba(0,0,0,0.18);
+    z-index: 1000;
+    overflow: hidden;
+}
+
+#sidebar-header {
+    padding: 14px 16px;
+    background: #1a73e8;
+    color: white;
+    flex-shrink: 0;
+}
+
+#sidebar-header h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.3px; margin-bottom: 10px; }
+
+#transport-modes { display: flex; gap: 5px; flex-wrap: wrap; }
+
+.mode-btn {
+    padding: 5px 11px;
+    background: transparent;
+    color: rgba(255,255,255,0.8);
+    border: 1.5px solid rgba(255,255,255,0.45);
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.15s;
+}
+.mode-btn:hover { background: rgba(255,255,255,0.12); }
+.mode-btn.active { background: rgba(255,255,255,0.22); border-color: white; color: white; font-weight: 600; }
+
+/* ===== CURVES CONTROL (moto) ===== */
+#curves-control {
+    margin-top: 10px;
+    background: rgba(0,0,0,0.18);
+    border-radius: 8px;
+    padding: 8px 12px 6px;
+}
+
+.curves-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.95);
+    margin-bottom: 6px;
+}
+
+#curves-badge {
+    background: rgba(255,255,255,0.25);
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 11px;
+    letter-spacing: 0.3px;
+}
+
+#curves-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.35);
+    outline: none;
+    cursor: pointer;
+}
+#curves-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: white;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,.35);
+    transition: transform 0.1s;
+}
+#curves-slider::-webkit-slider-thumb:hover { transform: scale(1.15); }
+#curves-slider::-moz-range-thumb {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: white;
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 1px 4px rgba(0,0,0,.35);
+}
+
+.curves-hints {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: rgba(255,255,255,0.65);
+    margin-top: 4px;
+}
+
+/* ===== SIDEBAR BODY ===== */
+#sidebar-body { flex: 1; overflow-y: auto; padding-bottom: 16px; }
+#sidebar-body::-webkit-scrollbar { width: 5px; }
+#sidebar-body::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 3px; }
+
+/* ===== WAYPOINTS ===== */
+#waypoints-container { padding: 12px 12px 0; }
+
+.waypoint-item {
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 10px;
+    margin-bottom: 8px;
+    transition: border-color 0.15s;
+}
+.waypoint-item:focus-within { border-color: #1a73e8; }
+
+.waypoint-header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+
+.waypoint-badge {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: white;
+    flex-shrink: 0;
+    background: #1a73e8;
+}
+.waypoint-badge.is-last { background: #ea4335; }
+
+/* piccolo pallino colorato che rappresenta il colore del tratto */
+.wp-leg-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 1.5px solid rgba(255,255,255,0.6);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.waypoint-label { flex: 1; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #333; }
+
+.btn-delete { background: none; border: none; color: #bbb; cursor: pointer; font-size: 15px; padding: 2px 5px; border-radius: 4px; transition: all 0.15s; }
+.btn-delete:hover { color: #ea4335; background: #fce8e6; }
+
+.waypoint-search { display: flex; gap: 6px; }
+
+.wp-search-input {
+    flex: 1;
+    padding: 6px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.wp-search-input:focus { border-color: #1a73e8; }
+
+.btn-search { padding: 6px 10px; background: #1a73e8; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.15s; }
+.btn-search:hover { background: #1557b0; }
+
+.wp-date-input, .wp-time-input {
+    padding: 5px 7px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #555;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.wp-date-input { flex: 1.6; }
+.wp-time-input { flex: 1; }
+.wp-date-input:focus, .wp-time-input:focus { border-color: #1a73e8; }
+
+#add-waypoint-btn {
+    width: 100%;
+    margin-top: 4px;
+    padding: 9px;
+    background: #e8f0fe;
+    color: #1a73e8;
+    border: 2px dashed #a8c7fa;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: all 0.15s;
+}
+#add-waypoint-btn:hover { background: #d2e3fc; border-color: #1a73e8; }
+
+/* ===== ROUTE CONTROLS ===== */
+#route-controls { display: flex; gap: 8px; padding: 12px; }
+
+.primary-btn {
+    flex: 1; padding: 11px;
+    background: #1a73e8; color: white;
+    border: none; border-radius: 8px;
+    cursor: pointer; font-size: 14px; font-weight: 600;
+    transition: background 0.15s;
+}
+.primary-btn:hover { background: #1557b0; }
+.primary-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+.danger-btn {
+    padding: 11px 14px;
+    background: white; color: #ea4335;
+    border: 1.5px solid #ea4335;
+    border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;
+    transition: all 0.15s;
+}
+.danger-btn:hover { background: #fce8e6; }
+
+/* ===== PANELS ===== */
+.panel { margin: 0 12px 12px; border: 1px solid #e0e0e0; border-radius: 10px; padding: 12px; background: #fff; }
+
+.panel-title { font-size: 12px; font-weight: 700; color: #5f6368; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.6px; }
+
+#summary-stats { display: flex; gap: 8px; margin-bottom: 12px; }
+
+.stat-box { flex: 1; background: #e8f0fe; border-radius: 8px; padding: 8px 10px; text-align: center; }
+.stat-label { font-size: 11px; color: #5f6368; margin-bottom: 3px; }
+.stat-value { font-size: 16px; font-weight: 700; color: #1a73e8; }
+
+/* ===== LEG CARDS (tratti colorati) ===== */
+.moto-info {
+    font-size: 12px;
+    color: #555;
+    background: #fff3e0;
+    border-radius: 6px;
+    padding: 5px 9px;
+    margin-bottom: 10px;
+    border-left: 3px solid #e67e22;
+}
+
+#legs-list { margin-top: 4px; }
+
+.leg-card {
+    border-left: 4px solid #ccc;   /* colore sovrascritto inline */
+    border-radius: 0 8px 8px 0;
+    padding: 10px 10px 10px 12px;
+    margin-bottom: 10px;
+    background: #fafafa;
+    border-top: 1px solid #eee;
+    border-right: 1px solid #eee;
+    border-bottom: 1px solid #eee;
+}
+
+.leg-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+
+.leg-color-dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+}
+
+.leg-card-title { font-weight: 700; font-size: 13px; color: #222; }
+
+.leg-card-stats { font-size: 12px; color: #666; margin-bottom: 8px; }
+
+.leg-curvature {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    margin-bottom: 8px;
+    padding: 4px 8px;
+    background: #f5f5f5;
+    border-radius: 6px;
+}
+.curve-dots { font-size: 13px; letter-spacing: 1px; font-weight: 700; line-height: 1; }
+.curve-label { color: #444; font-weight: 500; flex: 1; }
+.curve-score { color: #999; font-size: 10px; white-space: nowrap; }
+
+.leg-datetime-label { font-size: 11px; color: #888; margin-bottom: 4px; font-style: italic; }
+
+.leg-card-controls { display: flex; gap: 6px; align-items: center; }
+
+.btn-weather-seg {
+    padding: 5px 9px;
+    background: #34a853; color: white;
+    border: none; border-radius: 6px;
+    cursor: pointer; font-size: 11px; font-weight: 600;
+    white-space: nowrap; transition: background 0.15s;
+    flex-shrink: 0;
+}
+.btn-weather-seg:hover { background: #2d9247; }
+
+/* ===== METEO TRATTA: chip orizzontali ===== */
+.seg-weather-container { margin-top: 10px; }
+
+.seg-weather-header {
+    font-size: 11px;
+    color: #555;
+    margin-bottom: 6px;
+    padding-left: 8px;
+    border-left: 3px solid #ccc;  /* colore sovrascritto inline */
+    line-height: 1.4;
+}
+
+.seg-warn { color: #e67e22; font-weight: 600; }
+
+.seg-weather-row {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+}
+.seg-weather-row::-webkit-scrollbar { height: 4px; }
+.seg-weather-row::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
+
+.seg-weather-chip {
+    flex-shrink: 0;
+    width: 68px;
+    background: white;
+    border-radius: 8px;
+    padding: 6px 4px 5px;
+    text-align: center;
+    border-top: 4px solid #ccc;   /* colore temperatura, sovrascritto inline */
+    border: 1px solid #e8e8e8;
+    border-top-width: 4px;
+    cursor: default;
+    transition: transform 0.1s, box-shadow 0.1s;
+}
+.seg-weather-chip:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+
+.chip-dist { font-weight: 700; font-size: 9px; color: #999; margin-bottom: 1px; }
+.chip-time { font-size: 9px; color: #1a73e8; font-weight: 600; margin-bottom: 2px; }
+.chip-icon { font-size: 19px; line-height: 1.2; margin: 1px 0; }
+.chip-temp { font-weight: 700; font-size: 13px; color: #333; margin-bottom: 1px; }
+.chip-precip { color: #2980b9; font-size: 10px; }
+.chip-wind { color: #7f8c8d; font-size: 10px; }
+
+.seg-loading { padding: 8px 0; font-size: 12px; color: #888; font-style: italic; }
+.seg-error { padding: 6px 8px; font-size: 12px; color: #ea4335; background: #fce8e6; border-radius: 6px; }
+
+/* ===== SEARCH SUGGESTIONS ===== */
+#search-suggestions {
+    position: fixed;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.18);
+    z-index: 99999;
+    max-height: 260px;
+    overflow-y: auto;
+    min-width: 280px;
+    border: 1px solid #e0e0e0;
+}
+
+.suggestion-item { padding: 9px 14px; cursor: pointer; border-bottom: 1px solid #f5f5f5; font-size: 13px; line-height: 1.4; color: #333; }
+.suggestion-item:last-child { border-bottom: none; }
+.suggestion-item:hover { background: #e8f0fe; color: #1a73e8; }
+
+/* ===== MAP ===== */
+#map { flex: 1; height: 100vh; }
+
+/* ===== LOADING ===== */
+#loading {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.35);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 99998;
+}
+
+.loading-box {
+    background: white; border-radius: 12px; padding: 20px 28px;
+    display: flex; align-items: center; gap: 14px;
+    font-weight: 600; font-size: 14px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.2);
+}
+
+.spinner {
+    width: 22px; height: 22px;
+    border: 3px solid #e0e0e0;
+    border-top-color: #1a73e8;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== UTILITY ===== */
+.hidden { display: none !important; }
+
+/* Leaflet */
+.leaflet-popup-content-wrapper { border-radius: 8px; }
+.leaflet-control-zoom { border-radius: 8px !important; overflow: hidden; }

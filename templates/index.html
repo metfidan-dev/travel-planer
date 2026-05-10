@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Travel Planner</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+<div id="app">
+
+    <!-- ===== SIDEBAR ===== -->
+    <div id="sidebar">
+
+        <div id="sidebar-header">
+            <h1>Travel Planner</h1>
+            <div id="transport-modes">
+                <button class="mode-btn active" data-mode="driving" title="Auto">&#128663; Auto</button>
+                <button class="mode-btn" data-mode="cycling" title="Bicicletta">&#128692; Bici</button>
+                <button class="mode-btn" data-mode="walking" title="A piedi">&#128694; Piedi</button>
+                <button class="mode-btn" data-mode="motorcycle" title="Moto">&#127949; Moto</button>
+            </div>
+
+            <!-- Preferenza curve: visibile solo in modalità Moto -->
+            <div id="curves-control" class="hidden">
+                <div class="curves-label">
+                    <span>Preferenza curve</span>
+                    <span id="curves-badge">3 / 5</span>
+                </div>
+                <input id="curves-slider" type="range" min="1" max="5" value="3" step="1"
+                       oninput="onCurvesChange(this.value)" />
+                <div class="curves-hints">
+                    <span>1 – Diretto</span>
+                    <span>5 – Panoramico</span>
+                </div>
+            </div>
+        </div>
+
+        <div id="sidebar-body">
+
+            <!-- Waypoints: solo posizioni, date/ora sui tratti dopo calcolo -->
+            <div id="waypoints-container">
+                <div id="waypoints-list"></div>
+                <button id="add-waypoint-btn">+ Aggiungi tappa</button>
+            </div>
+
+            <!-- Controls -->
+            <div id="route-controls">
+                <button id="calculate-route-btn" class="primary-btn">Calcola percorso</button>
+                <button id="clear-route-btn" class="danger-btn">Azzera</button>
+            </div>
+
+            <!-- Legs panel injected here by JS after route calculation -->
+
+        </div>
+    </div>
+
+    <!-- ===== MAP ===== -->
+    <div id="map"></div>
+
+    <!-- ===== SEARCH DROPDOWN ===== -->
+    <div id="search-suggestions" class="hidden"></div>
+
+    <!-- ===== LOADING ===== -->
+    <div id="loading" class="hidden">
+        <div class="loading-box">
+            <div class="spinner"></div>
+            <span>Elaborazione...</span>
+        </div>
+    </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
