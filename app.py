@@ -566,34 +566,47 @@ def _blend_traffic(tomtom_level, heuristic_level):
 @app.route("/api/import-gmaps", methods=["POST"])
 def import_gmaps():
     """
-    Riceve un link Google Maps (anche short URL maps.app.goo.gl),
-    segue i redirect, estrae le tappe e le geocodifica.
+    Riceve un link Google Maps (anche short URL maps.app.goo.gl / Firebase Dynamic Link),
+    segue redirect HTTP e JS, bypassa la pagina consenso GDPR,
+    estrae le tappe e le geocodifica.
     """
     data = request.get_json() or {}
     url  = data.get("url", "").strip()
 
     if not url:
         return jsonify({"error": "URL non fornito"}), 400
-
     if not url.startswith("http"):
-        return jsonify({"error": "Inserisci un URL valido che inizia con http"}), 400
+        return jsonify({"error": "Inserisci un URL valido (inizia con http)"}), 400
 
-    # Segui i redirect (necessario per maps.app.goo.gl)
     browser_headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
-        )
+        ),
+        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
+
     try:
-        r = requests.get(url, allow_redirects=True, timeout=12, headers=browser_headers)
+        # Cookie che pre-accetta il consenso GDPR di Google (evita il redirect a consent.google.com)
+        session = requests.Session()
+        session.cookies.set("SOCS",    "CAI",       domain=".google.com")
+        session.cookies.set("CONSENT", "YES+cb.it", domain=".google.com")
+
+        r         = session.get(url, allow_redirects=True, timeout=14, headers=browser_headers)
         final_url = r.url
-        # Fallback: cerca URL Google Maps nel body se il redirect era via JS
-        if "google.com/maps" not in final_url:
-            match = re.search(r'(https://www\.google\.com/maps/[^"\'\\s]+)', r.text)
-            if match:
-                final_url = match.group(1)
+
+        # Se finiti su pagina consenso, estrai il vero URL dal parametro continue=
+        if "consent.google.com" in final_url or "accounts.google.com" in final_url:
+            m = re.search(r'[?&]continue=([^&"\']+)', r.text + "?" + r.url)
+            if m:
+                final_url = unquote_plus(m.group(1))
+
+        # Se ancora niente Google Maps, cerca nell'HTML (Firebase Dynamic Link / JS redirect)
+        if "google.com/maps" not in final_url and "maps.google.com" not in final_url:
+            final_url = _extract_maps_url_from_html(r.text) or final_url
+
     except requests.RequestException as e:
         return jsonify({"error": f"Impossibile aprire il link: {e}"}), 400
 
@@ -601,8 +614,10 @@ def import_gmaps():
     if not raw_wps:
         return jsonify({
             "error": (
-                "Nessuna tappa trovata. Assicurati di condividere un percorso "
-                "(Indicazioni stradali) da Google Maps, non solo un luogo."
+                "Nessuna tappa trovata nel link. "
+                "Condividi un percorso con Indicazioni stradali da Google Maps "
+                "(non solo un luogo). "
+                f"URL risolto: {final_url[:150]}"
             )
         }), 400
 
@@ -649,15 +664,43 @@ def import_gmaps():
 
 # ─── helpers per parsing URL Google Maps ────────────────────────────────────
 
+def _extract_maps_url_from_html(html):
+    """
+    Cerca l'URL Google Maps nell'HTML di una pagina intermedia
+    (Firebase Dynamic Link, pagina consenso, redirect JS).
+    """
+    patterns = [
+        # Link diretto /maps/dir/ — formato più specifico prima
+        r'(https://(?:www\.)?google\.com/maps/dir/[^"\'<>\s]{10,})',
+        # Qualsiasi URL Google Maps
+        r'(https://(?:www\.)?google\.com/maps/[^"\'<>\s]{10,})',
+        # JSON embedded: "link":"..."
+        r'"link"\s*:\s*"(https://[^"]*google[^"]*maps[^"]*)"',
+        # Firebase fallback_link
+        r'fallback_link["\s:=]+["\']?(https://[^"\'<>\s]+)',
+        # Meta refresh
+        r'content=["\']0;\s*url=(https://[^"\'<>\s]+)',
+        # deep_link_value nei Firebase Dynamic Links
+        r'deep_link_value=([^&"\'<>\s]+)',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, html)
+        if m:
+            candidate = unquote_plus(m.group(1))
+            if "google.com/maps" in candidate or "maps.google.com" in candidate:
+                return candidate
+    return None
+
+
 def _parse_gmaps_url(url):
-    """Estrae una lista di {lat, lon} o {name} da un URL Google Maps direzioni."""
+    """Estrae waypoints da un URL Google Maps in tutti i formati noti."""
     parsed = urlparse(url)
     path   = parsed.path
+    params = parse_qs(parsed.query)
 
-    # Formato /maps/dir/Partenza/Tappa/Arrivo
+    # ── Formato /maps/dir/Partenza/Tappa/Arrivo ──────────────────────────────
     if "/maps/dir/" in path:
         dir_part = path.split("/maps/dir/", 1)[1].rstrip("/")
-        # Rimuove la sezione @lat,lon,zoom della view
         if "/@" in dir_part:
             dir_part = dir_part.split("/@")[0]
         parts = [unquote_plus(p).strip() for p in dir_part.split("/") if p.strip()]
@@ -668,22 +711,58 @@ def _parse_gmaps_url(url):
             wp = _parse_gmaps_waypoint(part)
             if wp:
                 waypoints.append(wp)
-        return waypoints
+        if waypoints:
+            return waypoints
 
-    # Formato ?api=1&origin=A&destination=B&waypoints=C|D
-    params = parse_qs(parsed.query)
+    # ── Formato ?api=1&origin=A&destination=B&waypoints=C|D ─────────────────
     if "origin" in params or "destination" in params:
-        origin   = unquote_plus(params.get("origin",      [""])[0])
-        dest     = unquote_plus(params.get("destination", [""])[0])
-        wps_raw  = unquote_plus(params.get("waypoints",   [""])[0])
-        mid      = [w for w in wps_raw.split("|") if w] if wps_raw else []
+        origin  = unquote_plus(params.get("origin",      [""])[0])
+        dest    = unquote_plus(params.get("destination", [""])[0])
+        wps_raw = unquote_plus(params.get("waypoints",   [""])[0])
+        mid     = [w for w in wps_raw.split("|") if w] if wps_raw else []
         waypoints = []
         for loc in [origin] + mid + [dest]:
             if loc:
                 wp = _parse_gmaps_waypoint(loc)
                 if wp:
                     waypoints.append(wp)
-        return waypoints
+        if waypoints:
+            return waypoints
+
+    # ── Formato vecchio: ?saddr=A&daddr=B ───────────────────────────────────
+    if "saddr" in params or "daddr" in params:
+        origin = unquote_plus(params.get("saddr", [""])[0])
+        dest   = unquote_plus(params.get("daddr", [""])[0])
+        waypoints = []
+        for loc in [origin, dest]:
+            if loc:
+                wp = _parse_gmaps_waypoint(loc)
+                if wp:
+                    waypoints.append(wp)
+        if waypoints:
+            return waypoints
+
+    # ── Formato ?q=LUOGO (singolo luogo) ─────────────────────────────────────
+    if "q" in params:
+        q  = unquote_plus(params["q"][0])
+        wp = _parse_gmaps_waypoint(q)
+        if wp:
+            return [wp]
+
+    # ── Formato /maps/place/NOME/@lat,lon ────────────────────────────────────
+    if "/maps/place/" in path:
+        place_raw = path.split("/maps/place/", 1)[1].split("/")[0]
+        name      = unquote_plus(place_raw).replace("+", " ")
+        coord_m   = re.search(r"/@(-?\d+\.\d+),(-?\d+\.\d+)", path)
+        if coord_m:
+            return [{"lat": float(coord_m.group(1)), "lon": float(coord_m.group(2))}]
+        if name:
+            return [{"name": name}]
+
+    # ── Ultime speranze: coordinate nella parte @ dell'URL ───────────────────
+    coord_m = re.search(r"/@(-?\d+\.\d+),(-?\d+\.\d+)", url)
+    if coord_m:
+        return [{"lat": float(coord_m.group(1)), "lon": float(coord_m.group(2))}]
 
     return []
 
@@ -693,7 +772,6 @@ def _parse_gmaps_waypoint(text):
     text = text.strip()
     if not text:
         return None
-    # Coordinate esplicite: "-45.123,9.456"
     m = re.match(r"^(-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)$", text)
     if m:
         return {"lat": float(m.group(1)), "lon": float(m.group(2))}
