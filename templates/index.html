@@ -39,6 +39,18 @@
 
         <div id="sidebar-body">
 
+            <!-- Importa da Google Maps -->
+            <div id="import-gmaps-section">
+                <button id="import-gmaps-toggle" onclick="toggleImportSection()">
+                    &#128279; Importa percorso da Google Maps
+                </button>
+                <div id="import-gmaps-form" class="hidden">
+                    <input id="gmaps-url-input" type="url"
+                        placeholder="Incolla il link Google Maps..." />
+                    <button id="import-gmaps-btn" onclick="importGmapsUrl()">Importa</button>
+                </div>
+            </div>
+
             <!-- Waypoints: solo posizioni, date/ora sui tratti dopo calcolo -->
             <div id="waypoints-container">
                 <div id="waypoints-list"></div>

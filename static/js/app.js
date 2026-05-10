@@ -777,6 +777,73 @@ function curveColor(stars) {
     return colors[(stars || 1) - 1];
 }
 
+// ===== IMPORT GOOGLE MAPS =====
+function toggleImportSection() {
+    const form = document.getElementById("import-gmaps-form");
+    const btn  = document.getElementById("import-gmaps-toggle");
+    const open = form.classList.toggle("hidden") === false;
+    btn.classList.toggle("open", open);
+    if (open) document.getElementById("gmaps-url-input").focus();
+}
+
+async function importGmapsUrl() {
+    const input = document.getElementById("gmaps-url-input");
+    const url   = input.value.trim();
+    if (!url) { input.focus(); return; }
+
+    const btn = document.getElementById("import-gmaps-btn");
+    btn.disabled = true;
+    btn.textContent = "Caricamento…";
+    showLoading(true);
+
+    try {
+        const res  = await fetch("/api/import-gmaps", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+        });
+        const data = await res.json();
+
+        if (data.error) { alert("Errore: " + data.error); return; }
+        if (!Array.isArray(data) || data.length < 2) {
+            alert("Servono almeno 2 tappe. Condividi un percorso con indicazioni stradali da Google Maps.");
+            return;
+        }
+
+        // Sostituisce le tappe correnti senza chiedere conferma
+        Object.keys(state.markers).forEach((k) => removeMarker(Number(k)));
+        clearLegs();
+        state.waypoints = [];
+        wpCounter = 0;
+
+        data.forEach((wp) => addWaypoint(wp.name || "", wp.lat, wp.lon));
+        renderWaypoints();
+
+        // Centra la mappa sulle tappe trovate
+        const validLL = data
+            .filter((w) => w.lat && w.lon)
+            .map((w) => [w.lat, w.lon]);
+        if (validLL.length) state.map.fitBounds(L.latLngBounds(validLL), { padding: [40, 40] });
+
+        // Chiudi il pannello import
+        document.getElementById("import-gmaps-form").classList.add("hidden");
+        document.getElementById("import-gmaps-toggle").classList.remove("open");
+        input.value = "";
+
+        // Notifica tappe con errore di geocoding
+        const failed = data.filter((w) => w.error);
+        if (failed.length) {
+            alert(`Attenzione: ${failed.length} tappa/e non trovata/e (${failed.map((f) => f.name).join(", ")}). Posizionala manualmente sulla mappa.`);
+        }
+    } catch (err) {
+        alert("Errore di connessione.");
+        console.error(err);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Importa";
+        showLoading(false);
+    }
+}
+
 // ===== MOBILE VIEW TOGGLE =====
 function toggleMobileView() {
     const isMapView = document.body.classList.toggle("mobile-map-view");

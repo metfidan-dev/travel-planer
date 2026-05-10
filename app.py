@@ -1,7 +1,9 @@
 import math
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qs, unquote_plus
 from flask import Flask, render_template, request, jsonify
 import requests
 
@@ -559,6 +561,143 @@ def _blend_traffic(tomtom_level, heuristic_level):
     euristica per orario (30%) per ottenere la stima punto per punto.
     """
     return max(1, min(5, round(0.70 * tomtom_level + 0.30 * heuristic_level)))
+
+
+@app.route("/api/import-gmaps", methods=["POST"])
+def import_gmaps():
+    """
+    Riceve un link Google Maps (anche short URL maps.app.goo.gl),
+    segue i redirect, estrae le tappe e le geocodifica.
+    """
+    data = request.get_json() or {}
+    url  = data.get("url", "").strip()
+
+    if not url:
+        return jsonify({"error": "URL non fornito"}), 400
+
+    if not url.startswith("http"):
+        return jsonify({"error": "Inserisci un URL valido che inizia con http"}), 400
+
+    # Segui i redirect (necessario per maps.app.goo.gl)
+    browser_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        r = requests.get(url, allow_redirects=True, timeout=12, headers=browser_headers)
+        final_url = r.url
+        # Fallback: cerca URL Google Maps nel body se il redirect era via JS
+        if "google.com/maps" not in final_url:
+            match = re.search(r'(https://www\.google\.com/maps/[^"\'\\s]+)', r.text)
+            if match:
+                final_url = match.group(1)
+    except requests.RequestException as e:
+        return jsonify({"error": f"Impossibile aprire il link: {e}"}), 400
+
+    raw_wps = _parse_gmaps_url(final_url)
+    if not raw_wps:
+        return jsonify({
+            "error": (
+                "Nessuna tappa trovata. Assicurati di condividere un percorso "
+                "(Indicazioni stradali) da Google Maps, non solo un luogo."
+            )
+        }), 400
+
+    # Geocodifica le tappe che non hanno già coordinate
+    def resolve(wp):
+        if wp.get("lat") is not None:
+            try:
+                rev = requests.get(
+                    f"{NOMINATIM_URL}/reverse",
+                    params={"lat": wp["lat"], "lon": wp["lon"], "format": "json"},
+                    headers=HEADERS, timeout=8,
+                )
+                rev.raise_for_status()
+                d    = rev.json()
+                name = ", ".join(d.get("display_name", "").split(",")[:2]).strip()
+            except Exception:
+                name = f"{wp['lat']:.5f}, {wp['lon']:.5f}"
+            return {"name": name, "lat": wp["lat"], "lon": wp["lon"]}
+        else:
+            name = wp.get("name", "")
+            try:
+                geo = requests.get(
+                    f"{NOMINATIM_URL}/search",
+                    params={"q": name, "format": "json", "limit": 1},
+                    headers=HEADERS, timeout=8,
+                )
+                geo.raise_for_status()
+                places = geo.json()
+                if places:
+                    return {
+                        "name":  name,
+                        "lat":   float(places[0]["lat"]),
+                        "lon":   float(places[0]["lon"]),
+                    }
+            except Exception:
+                pass
+            return {"name": name, "lat": None, "lon": None, "error": "Non trovato"}
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        results = list(ex.map(resolve, raw_wps))
+
+    return jsonify(results)
+
+
+# ─── helpers per parsing URL Google Maps ────────────────────────────────────
+
+def _parse_gmaps_url(url):
+    """Estrae una lista di {lat, lon} o {name} da un URL Google Maps direzioni."""
+    parsed = urlparse(url)
+    path   = parsed.path
+
+    # Formato /maps/dir/Partenza/Tappa/Arrivo
+    if "/maps/dir/" in path:
+        dir_part = path.split("/maps/dir/", 1)[1].rstrip("/")
+        # Rimuove la sezione @lat,lon,zoom della view
+        if "/@" in dir_part:
+            dir_part = dir_part.split("/@")[0]
+        parts = [unquote_plus(p).strip() for p in dir_part.split("/") if p.strip()]
+        waypoints = []
+        for part in parts:
+            if part.startswith("data=") or part.startswith("!"):
+                break
+            wp = _parse_gmaps_waypoint(part)
+            if wp:
+                waypoints.append(wp)
+        return waypoints
+
+    # Formato ?api=1&origin=A&destination=B&waypoints=C|D
+    params = parse_qs(parsed.query)
+    if "origin" in params or "destination" in params:
+        origin   = unquote_plus(params.get("origin",      [""])[0])
+        dest     = unquote_plus(params.get("destination", [""])[0])
+        wps_raw  = unquote_plus(params.get("waypoints",   [""])[0])
+        mid      = [w for w in wps_raw.split("|") if w] if wps_raw else []
+        waypoints = []
+        for loc in [origin] + mid + [dest]:
+            if loc:
+                wp = _parse_gmaps_waypoint(loc)
+                if wp:
+                    waypoints.append(wp)
+        return waypoints
+
+    return []
+
+
+def _parse_gmaps_waypoint(text):
+    """Parsa una singola stringa waypoint: lat,lon oppure nome luogo."""
+    text = text.strip()
+    if not text:
+        return None
+    # Coordinate esplicite: "-45.123,9.456"
+    m = re.match(r"^(-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)$", text)
+    if m:
+        return {"lat": float(m.group(1)), "lon": float(m.group(2))}
+    return {"name": text}
 
 
 if __name__ == "__main__":
