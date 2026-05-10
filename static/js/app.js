@@ -551,16 +551,20 @@ async function fetchTrafficSegment(legIdx) {
                 time: leg.time || "09:00",
                 duration_sec: leg.duration_sec,
                 distance_km: leg.distance_km,
+                profile: state.mode,
             }),
         });
-        const results = await res.json();
+        const data = await res.json();
 
-        if (!Array.isArray(results)) {
-            container.innerHTML = `<div class="seg-error">&#9888; ${escHtml(results.error || "Errore sconosciuto")}</div>`;
+        if (data.error) {
+            container.innerHTML = `<div class="seg-error">&#9888; ${escHtml(data.error)}</div>`;
             return;
         }
 
-        renderSegmentTraffic(legIdx, results, leg.time || "09:00", leg.date, leg.color);
+        const results = data.points || data;
+        const meta    = data.points ? data : null;
+
+        renderSegmentTraffic(legIdx, results, leg.time || "09:00", leg.date, leg.color, meta);
         renderTrafficMarkersOnMap(legIdx, results);
     } catch (err) {
         container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
@@ -568,18 +572,22 @@ async function fetchTrafficSegment(legIdx) {
     } finally { showLoading(false); }
 }
 
-function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor) {
+function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor, meta) {
     const container = document.getElementById(`seg-traffic-${legIdx}`);
     if (!container) return;
 
-    const usedTomTom = results.some((r) => r.source === "tomtom");
-    const sourceBadge = usedTomTom
-        ? `<span class="traffic-source-badge tomtom">&#128225; TomTom live</span>`
+    const src = meta?.source || results[0]?.source || "heuristic";
+    const isTomTom = src === "tomtom_historical";
+    const sourceBadge = isTomTom
+        ? `<span class="traffic-source-badge tomtom">&#128225; TomTom storico</span>`
         : `<span class="traffic-source-badge heuristic">&#128202; Stima statistica</span>`;
+    const delayNote = (isTomTom && meta?.leg_delay_min > 0)
+        ? `&nbsp;&mdash; ritardo atteso <strong>+${meta.leg_delay_min} min</strong>`
+        : "";
 
     container.innerHTML = `
       <div class="seg-weather-header" style="border-left-color:${legColor}">
-        &#128678; Traffico &mdash; ${fmtDate(dateStr)} ore ${departureTime}
+        &#128678; Traffico &mdash; ${fmtDate(dateStr)} ore ${departureTime}${delayNote}
         ${sourceBadge}
       </div>
       <div class="seg-weather-row" id="seg-traffic-chips-${legIdx}"></div>

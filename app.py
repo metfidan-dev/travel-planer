@@ -11,7 +11,8 @@ NOMINATIM_URL  = "https://nominatim.openstreetmap.org"
 OSRM_URL       = "http://router.project-osrm.org"
 VALHALLA_URL   = "https://valhalla1.openstreetmap.de"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1"
-TOMTOM_URL     = "https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json"
+TOMTOM_ROUTING = "https://api.tomtom.com/routing/1/calculateRoute"
+TOMTOM_MODES   = {"driving": "car", "motorcycle": "motorcycle", "cycling": "bicycle", "walking": "pedestrian"}
 HEADERS        = {"User-Agent": "TravelPlannerApp/1.0 (educational project)"}
 
 WMO_DESCRIPTIONS = {
@@ -201,8 +202,9 @@ def weather_segment():
 @app.route("/api/traffic-segment", methods=["POST"])
 def traffic_segment():
     """
-    Traffico ogni 20 km lungo un tratto.
-    Se TOMTOM_API_KEY è impostata usa TomTom Traffic Flow (dati reali).
+    Traffico ogni 20 km con orario stimato di passaggio.
+    Se TOMTOM_API_KEY è impostata usa TomTom Routing API con departAt
+    (dati storici per quel giorno/ora specifici).
     Altrimenti usa stima euristica giorno+ora.
     """
     data = request.get_json() or {}
@@ -211,6 +213,7 @@ def traffic_segment():
     time_str     = data.get("time", "09:00")
     duration_sec = float(data.get("duration_sec", 0))
     distance_km  = float(data.get("distance_km", 1))
+    profile      = data.get("profile", "driving")
 
     if not geometry or not date_str:
         return jsonify({"error": "geometry e date sono obbligatori"}), 400
@@ -224,56 +227,29 @@ def traffic_segment():
     except ValueError:
         return jsonify({"error": "Formato data/ora non valido (YYYY-MM-DD HH:MM)"}), 400
 
-    api_key = os.environ.get("TOMTOM_API_KEY", "").strip()
-    points  = _sample_route_points(coords, interval_km=20)
+    api_key     = os.environ.get("TOMTOM_API_KEY", "").strip()
+    tomtom_data = None
+    source      = "heuristic"
 
-    def fetch_traffic(pt):
+    if api_key:
+        try:
+            tomtom_data = _tomtom_route_traffic(coords[0], coords[-1], departure, api_key, profile)
+            source = "tomtom_historical"
+        except Exception:
+            pass
+
+    points  = _sample_route_points(coords, interval_km=20)
+    results = []
+
+    for pt in points:
         fraction = min(pt["dist_km"] / distance_km, 1.0) if distance_km > 0 else 0.0
         point_dt = departure + timedelta(seconds=fraction * duration_sec)
         weekday  = point_dt.weekday()
 
-        level  = None
-        source = "heuristic"
-        extra  = {}
+        h_level = _estimate_traffic_level(weekday, point_dt.hour, point_dt.minute)
+        level   = _blend_traffic(tomtom_data["level"], h_level) if tomtom_data else h_level
 
-        if api_key:
-            try:
-                r = requests.get(
-                    TOMTOM_URL,
-                    params={"point": f"{pt['lat']},{pt['lon']}", "key": api_key},
-                    timeout=8,
-                )
-                r.raise_for_status()
-                fd = r.json().get("flowSegmentData", {})
-                current   = fd.get("currentSpeed", 0)
-                free_flow = fd.get("freeFlowSpeed", 1) or 1
-                closed    = fd.get("roadClosure", False)
-
-                if closed:
-                    level = 5
-                else:
-                    ratio = current / free_flow
-                    if   ratio > 0.85: level = 1
-                    elif ratio > 0.70: level = 2
-                    elif ratio > 0.55: level = 3
-                    elif ratio > 0.40: level = 4
-                    else:              level = 5
-
-                source = "tomtom"
-                extra  = {
-                    "current_speed":   round(current),
-                    "free_flow_speed": round(free_flow),
-                    "flow_ratio":      round(current / free_flow, 2),
-                    "road_closure":    closed,
-                }
-            except Exception:
-                level  = None   # fallback sotto
-                source = "heuristic"
-
-        if level is None:
-            level = _estimate_traffic_level(weekday, point_dt.hour, point_dt.minute)
-
-        return {
+        results.append({
             "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
             "estimated_time": point_dt.strftime("%H:%M"),
             "estimated_date": point_dt.strftime("%Y-%m-%d"),
@@ -284,13 +260,14 @@ def traffic_segment():
             "traffic_icon":   TRAFFIC_ICONS[level],
             "delay_percent":  TRAFFIC_DELAY[level],
             "source":         source,
-            **extra,
-        }
+        })
 
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        results = list(ex.map(fetch_traffic, points))
-
-    return jsonify(results)
+    return jsonify({
+        "source":         source,
+        "leg_delay_min":  tomtom_data["delay_min"]  if tomtom_data else None,
+        "leg_flow_ratio": tomtom_data["flow_ratio"] if tomtom_data else None,
+        "points":         results,
+    })
 
 
 # ───── routing helpers ──────────────────────────────────────────────────────
@@ -521,6 +498,64 @@ def _estimate_traffic_level(weekday, hour, minute):
         if  13.0 <= t < 16.0:  return 2
         if  19.0 <= t < 22.0:  return 2
         return 1
+
+
+def _tomtom_route_traffic(start_coord, end_coord, depart_dt, api_key, profile="driving"):
+    """
+    Chiama TomTom Routing API con departAt per ottenere la stima storica del traffico
+    per quel giorno/ora specifici. start_coord e end_coord sono [lon, lat] (GeoJSON).
+    Restituisce level 1-5, delay_min e flow_ratio.
+    """
+    lat1, lon1 = start_coord[1], start_coord[0]
+    lat2, lon2 = end_coord[1],   end_coord[0]
+    mode       = TOMTOM_MODES.get(profile, "car")
+    depart_str = depart_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    r = requests.get(
+        f"{TOMTOM_ROUTING}/{lat1},{lon1}:{lat2},{lon2}/json",
+        params={
+            "departAt":   depart_str,
+            "traffic":    "true",
+            "travelMode": mode,
+            "key":        api_key,
+        },
+        timeout=12,
+    )
+    r.raise_for_status()
+    summary = r.json()["routes"][0]["summary"]
+
+    travel_time  = summary.get("travelTimeInSeconds", 0)
+    no_traffic   = summary.get("noTrafficTravelTimeInSeconds", 0)
+    historic     = summary.get("historicTrafficTravelTimeInSeconds", 0) or travel_time
+    delay        = summary.get("trafficDelayInSeconds", 0)
+
+    # Preferisci noTraffic vs historic se disponibili, altrimenti travelTime - delay
+    if no_traffic > 0 and historic > 0:
+        ratio = no_traffic / historic
+    elif travel_time > 0:
+        ratio = max(0.0, (travel_time - delay) / travel_time)
+    else:
+        ratio = 1.0
+
+    if   ratio > 0.93: level = 1
+    elif ratio > 0.80: level = 2
+    elif ratio > 0.65: level = 3
+    elif ratio > 0.50: level = 4
+    else:              level = 5
+
+    return {
+        "level":      level,
+        "delay_min":  round(delay / 60),
+        "flow_ratio": round(ratio, 2),
+    }
+
+
+def _blend_traffic(tomtom_level, heuristic_level):
+    """
+    Combina il livello TomTom storico (del tratto, 70%) con la variazione
+    euristica per orario (30%) per ottenere la stima punto per punto.
+    """
+    return max(1, min(5, round(0.70 * tomtom_level + 0.30 * heuristic_level)))
 
 
 if __name__ == "__main__":
