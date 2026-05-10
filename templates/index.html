@@ -45,6 +45,18 @@
                 <button id="add-waypoint-btn">+ Aggiungi tappa</button>
             </div>
 
+            <!-- Campionatura meteo/traffico -->
+            <div id="sample-control">
+                <label class="sample-label" for="sample-interval-select">Dettaglio meteo/traffico:</label>
+                <select id="sample-interval-select" class="sample-select">
+                    <option value="5">ogni 5 km</option>
+                    <option value="10">ogni 10 km</option>
+                    <option value="20" selected>ogni 20 km</option>
+                    <option value="30">ogni 30 km</option>
+                    <option value="50">ogni 50 km</option>
+                </select>
+            </div>
+
             <!-- Controls -->
             <div id="route-controls">
                 <button id="calculate-route-btn" class="primary-btn">Calcola percorso</button>

@@ -15,6 +15,7 @@ const state = {
     mapView: "none",
     mode: "driving",
     curvePref: 3,
+    sampleInterval: 20,
     searchTimer: null,
 };
 
@@ -39,6 +40,10 @@ function bindControls() {
     document.getElementById("add-waypoint-btn").addEventListener("click", () => addWaypoint());
     document.getElementById("calculate-route-btn").addEventListener("click", calculateRoute);
     document.getElementById("clear-route-btn").addEventListener("click", clearAll);
+
+    document.getElementById("sample-interval-select").addEventListener("change", (e) => {
+        state.sampleInterval = parseInt(e.target.value, 10);
+    });
 
     document.querySelectorAll(".mode-btn").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -407,6 +412,7 @@ async function fetchWeatherSegment(legIdx) {
                 time: leg.time || "09:00",
                 duration_sec: leg.duration_sec,
                 distance_km: leg.distance_km,
+                interval_km: state.sampleInterval,
             }),
         });
         const results = await res.json();
@@ -441,7 +447,7 @@ function renderSegmentWeather(legIdx, results, departureTime, dateStr, legColor)
 
     container.innerHTML = `
       <div class="seg-weather-header" style="border-left-color:${legColor}">
-        Partenza ${fmtDate(dateStr)} ore ${departureTime} &mdash; ${valid.length} punti ogni ~20 km
+        Partenza ${fmtDate(dateStr)} ore ${departureTime} &mdash; ${valid.length} punti ogni ~${state.sampleInterval} km
         ${errCount > 0 ? `<span class="seg-warn">(${errCount} non disp.)</span>` : ""}
       </div>
       <div class="seg-weather-row" id="seg-chips-${legIdx}"></div>
@@ -583,6 +589,7 @@ async function fetchTrafficSegment(legIdx) {
                 duration_sec: leg.duration_sec,
                 distance_km: leg.distance_km,
                 profile: state.mode,
+                interval_km: state.sampleInterval,
             }),
         });
         const data = await res.json();
@@ -620,7 +627,7 @@ function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor,
 
     container.innerHTML = `
       <div class="seg-weather-header" style="border-left-color:${legColor}">
-        &#128678; Traffico &mdash; ${fmtDate(dateStr)} ore ${departureTime}${delayNote}
+        &#128678; Traffico &mdash; ${fmtDate(dateStr)} ore ${departureTime} &mdash; ${results.length} punti ogni ~${state.sampleInterval} km${delayNote}
         ${sourceBadge}
       </div>
       <div class="seg-weather-row" id="seg-traffic-chips-${legIdx}"></div>

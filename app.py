@@ -131,6 +131,8 @@ def weather_segment():
     if not geometry or not date_str:
         return jsonify({"error": "geometry e date sono obbligatori"}), 400
 
+    interval_km = max(5, min(50, int(data.get("interval_km", 20))))
+
     coords = geometry.get("coordinates", [])
     if len(coords) < 2:
         return jsonify({"error": "Geometria non valida"}), 400
@@ -149,7 +151,7 @@ def weather_segment():
     if end_days > 16:
         return jsonify({"error": "Il viaggio supera il limite di previsioni di 16 giorni"}), 400
 
-    points = _sample_route_points(coords, interval_km=20)
+    points = _sample_route_points(coords, interval_km=interval_km)
 
     def fetch(pt):
         fraction = min(pt["dist_km"] / distance_km, 1.0) if distance_km > 0 else 0.0
@@ -214,6 +216,7 @@ def traffic_segment():
     duration_sec = float(data.get("duration_sec", 0))
     distance_km  = float(data.get("distance_km", 1))
     profile      = data.get("profile", "driving")
+    interval_km  = max(5, min(50, int(data.get("interval_km", 20))))
 
     if not geometry or not date_str:
         return jsonify({"error": "geometry e date sono obbligatori"}), 400
@@ -238,7 +241,7 @@ def traffic_segment():
         except Exception:
             pass
 
-    points  = _sample_route_points(coords, interval_km=20)
+    points  = _sample_route_points(coords, interval_km=interval_km)
     results = []
 
     for pt in points:
