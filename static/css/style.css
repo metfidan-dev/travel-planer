@@ -487,6 +487,10 @@ body {
 .leg-card-btns .btn-weather-seg,
 .leg-card-btns .btn-traffic-seg { flex: 1; }
 
+.legs-day-btns { display: flex; gap: 6px; margin-top: 7px; }
+.legs-day-btns .btn-weather-seg,
+.legs-day-btns .btn-traffic-seg { flex: 1; }
+
 .btn-weather-seg {
     padding: 5px 9px;
     background: #34a853; color: white;

@@ -10,15 +10,15 @@ const state = {
     markers: {},
     legs: [],
     legLayers: [],
-    weatherGroups: [],
-    trafficGroups: [],
+    weatherGroups: {},   // keyed by "day-N"
+    trafficGroups: {},   // keyed by "day-N"
     mapView: "none",
     mode: "driving",
     curvePref: 1,
     sampleInterval: 20,
     searchTimer: null,
     autoRecalcTimer: null,
-    dayDates: {},   // {dayIdx: {date, time}}
+    dayDates: {},        // {N: {date, time, weatherFetched, trafficFetched}}
 };
 
 // ===== INIT =====
@@ -67,7 +67,6 @@ function bindControls() {
 function onCurvesChange(val) {
     state.curvePref = parseInt(val, 10);
     document.getElementById("curves-badge").textContent = `${val} / 5`;
-    // Propagate global value to all existing legs
     state.legs.forEach((l) => { l.curves = state.curvePref; });
     scheduleRecalculate();
 }
@@ -75,14 +74,11 @@ function onCurvesChange(val) {
 // ===== AUTO RECALCULATE =====
 function scheduleRecalculate() {
     clearTimeout(state.autoRecalcTimer);
-    const savedLegData = state.legs.map((l) => ({
-        weatherFetched: l.weatherFetched || false,
-        trafficFetched: l.trafficFetched || false,
-        curves:         l.curves ?? state.curvePref,
-    }));
+    // Save only per-leg curves; day dates/fetched flags live in state.dayDates
+    const savedLegCurves = state.legs.map((l) => l.curves ?? state.curvePref);
     state.autoRecalcTimer = setTimeout(() => {
         const valid = state.waypoints.filter((w) => w.lat && w.lon);
-        if (valid.length >= 2) calculateRoute(savedLegData.length ? savedLegData : null);
+        if (valid.length >= 2) calculateRoute(savedLegCurves.length ? savedLegCurves : null);
     }, 900);
 }
 
@@ -101,6 +97,26 @@ function toggleDaySplit(wpId) {
     wp.startNewDay = !wp.startNewDay;
     renderWaypoints();
     scheduleRecalculate();
+}
+
+// Concatena le geometrie di tutti i tratti di un giorno
+function getDayGeometry(dayIdx) {
+    const dayLegs = state.legs.filter((l) => l.day === dayIdx);
+    if (!dayLegs.length) return null;
+    let coords = [...dayLegs[0].geometry.coordinates];
+    for (let i = 1; i < dayLegs.length; i++) {
+        const c = dayLegs[i].geometry.coordinates;
+        coords = coords.concat(c.slice(1)); // salta il primo punto (duplicato)
+    }
+    return { type: "LineString", coordinates: coords };
+}
+
+function getDayStats(dayIdx) {
+    const dayLegs = state.legs.filter((l) => l.day === dayIdx);
+    return {
+        duration_sec: dayLegs.reduce((s, l) => s + (l.duration_sec || 0), 0),
+        distance_km:  dayLegs.reduce((s, l) => s + (parseFloat(l.distance_km) || 0), 0),
+    };
 }
 
 // ===== WAYPOINTS =====
@@ -153,7 +169,7 @@ function renderWaypoints() {
         const dotColor = isLast ? "#ea4335" : dayColor;
 
         const div = document.createElement("div");
-        div.className  = "waypoint-item";
+        div.className    = "waypoint-item";
         div.dataset.wpid = wp.id;
         div.innerHTML = `
           <div class="waypoint-header">
@@ -316,17 +332,16 @@ function selectPlace(id, result) {
 }
 
 // ===== ROUTING =====
-async function calculateRoute(savedLegData = null) {
+async function calculateRoute(savedLegCurves = null) {
     const valid = state.waypoints.filter((w) => w.lat && w.lon);
     if (valid.length < 2) {
-        if (!savedLegData) alert("Aggiungi almeno 2 tappe con posizione valida prima di calcolare il percorso.");
+        if (!savedLegCurves) alert("Aggiungi almeno 2 tappe con posizione valida prima di calcolare il percorso.");
         return;
     }
     showLoading(true);
     try {
-        // Build per-leg curves array: restore from savedLegData or default to curvePref
         const curvesPerLeg = Array.from({ length: valid.length - 1 }, (_, i) =>
-            savedLegData?.[i]?.curves ?? state.curvePref
+            savedLegCurves?.[i] ?? state.curvePref
         );
 
         const res = await fetch("/api/route", {
@@ -339,9 +354,8 @@ async function calculateRoute(savedLegData = null) {
             }),
         });
         const data = await res.json();
-        if (data.error) { if (!savedLegData) alert("Errore percorso: " + data.error); return; }
+        if (data.error) { if (!savedLegCurves) alert("Errore percorso: " + data.error); return; }
 
-        // Compute day index for each valid waypoint
         const allDays   = computeWaypointDays();
         const validDays = state.waypoints
             .filter((wp) => wp.lat && wp.lon)
@@ -356,15 +370,13 @@ async function calculateRoute(savedLegData = null) {
                 fromName:       valid[i]?.name     || `Tappa ${i + 1}`,
                 toName:         valid[i + 1]?.name || `Tappa ${i + 2}`,
                 curves:         curvesPerLeg[i] ?? state.curvePref,
-                weatherFetched: false,
-                trafficFetched: false,
             };
         });
 
-        // Ensure dayDates has an entry for every day in this route
+        // Ensure dayDates has an entry for every day
         const maxDay = Math.max(...state.legs.map((l) => l.day), 0);
         for (let d = 0; d <= maxDay; d++) {
-            if (!state.dayDates[d]) state.dayDates[d] = { date: "", time: "09:00" };
+            if (!state.dayDates[d]) state.dayDates[d] = { date: "", time: "09:00", weatherFetched: false, trafficFetched: false };
         }
 
         drawLegsOnMap();
@@ -373,23 +385,22 @@ async function calculateRoute(savedLegData = null) {
         const allLL = state.legs.flatMap((l) => l.geometry.coordinates.map(([ln, lt]) => [lt, ln]));
         if (allLL.length) state.map.fitBounds(L.latLngBounds(allLL), { padding: [30, 30] });
 
-        // Re-fetch weather/traffic for legs that had data before recalc
-        if (savedLegData) {
-            for (let i = 0; i < state.legs.length; i++) {
-                const saved   = savedLegData[i];
-                const dayDate = state.dayDates[state.legs[i].day];
-                if (!saved || !dayDate?.date) continue;
-                if (saved.weatherFetched) fetchWeatherSegment(i);
-                if (saved.trafficFetched)  fetchTrafficSegment(i);
+        // Re-fetch meteo/traffico per i giorni che li avevano già caricati
+        if (savedLegCurves) {
+            for (let d = 0; d <= maxDay; d++) {
+                const dd = state.dayDates[d];
+                if (!dd?.date) continue;
+                if (dd.weatherFetched) fetchWeatherDay(d);
+                if (dd.trafficFetched)  fetchTrafficDay(d);
             }
         }
     } catch (err) {
-        if (!savedLegData) alert("Errore di connessione durante il calcolo del percorso.");
+        if (!savedLegCurves) alert("Errore di connessione durante il calcolo del percorso.");
         console.error(err);
     } finally { showLoading(false); }
 }
 
-// ===== MAPPA: POLILINEE COLORATE =====
+// ===== MAPPA: POLILINEE =====
 function drawLegsOnMap() {
     state.legLayers.forEach((l) => l.remove());
     state.legLayers = [];
@@ -415,7 +426,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
     panel.className = "panel";
 
     const motoNote = state.mode === "motorcycle"
-        ? `<div class="moto-info">&#127949; Moto &mdash; curve impostabili per tratto</div>`
+        ? `<div class="moto-info">&#127949; Moto &mdash; curve selezionabili per tratto</div>`
         : "";
 
     panel.innerHTML = `
@@ -441,7 +452,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
         const dayTotalKm = dayLegs.reduce((s, l) => s + (parseFloat(l.distance_km) || 0), 0).toFixed(1);
         const dd         = state.dayDates[d] || { date: "", time: "09:00" };
 
-        // Day header with date/time
+        // ── Day header ──────────────────────────────────────────────────────
         const sep = document.createElement("div");
         sep.className = "legs-day-header";
         sep.style.borderLeftColor = dayColor;
@@ -459,9 +470,16 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
               value="${dd.time || "09:00"}"
               onchange="updateDayDate(${d}, 'time', this.value)" />
           </div>
+          <div class="legs-day-btns">
+            <button class="btn-weather-seg" onclick="fetchWeatherDay(${d})">&#127780; Meteo</button>
+            <button class="btn-traffic-seg" onclick="fetchTrafficDay(${d})">&#128678; Traffico</button>
+          </div>
+          <div class="seg-weather-container" id="seg-weather-day-${d}"></div>
+          <div class="seg-traffic-container" id="seg-traffic-day-${d}"></div>
         `;
         legsList.appendChild(sep);
 
+        // ── Leg cards ───────────────────────────────────────────────────────
         dayLegs.forEach((leg) => {
             const idx  = state.legs.indexOf(leg);
             const from = leg.fromName.split(",")[0];
@@ -483,7 +501,6 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
             card.className = "leg-card";
             card.id        = `leg-card-${idx}`;
             card.style.borderLeftColor = leg.color;
-
             card.innerHTML = `
               <div class="leg-card-header">
                 <div class="leg-color-dot" style="background:${leg.color}"></div>
@@ -496,12 +513,6 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
                 <span class="curve-score">${leg.curvature_score || 0} °/km</span>
               </div>
               ${curvesHtml}
-              <div class="leg-card-btns">
-                <button class="btn-weather-seg" onclick="fetchWeatherSegment(${idx})">&#127780; Meteo</button>
-                <button class="btn-traffic-seg" onclick="fetchTrafficSegment(${idx})">&#128678; Traffico</button>
-              </div>
-              <div class="seg-weather-container" id="seg-weather-${idx}"></div>
-              <div class="seg-traffic-container" id="seg-traffic-${idx}"></div>
             `;
             legsList.appendChild(card);
         });
@@ -510,7 +521,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
 
 // ===== UPDATE HELPERS =====
 function updateDayDate(dayIdx, key, val) {
-    if (!state.dayDates[dayIdx]) state.dayDates[dayIdx] = { date: "", time: "09:00" };
+    if (!state.dayDates[dayIdx]) state.dayDates[dayIdx] = { date: "", time: "09:00", weatherFetched: false, trafficFetched: false };
     state.dayDates[dayIdx][key] = val;
 }
 
@@ -522,18 +533,19 @@ function updateLegCurves(legIdx, val) {
     scheduleRecalculate();
 }
 
-// ===== METEO PER TRATTO =====
-async function fetchWeatherSegment(legIdx) {
-    const leg     = state.legs[legIdx];
-    if (!leg) return;
-    const dayDate = state.dayDates[leg.day];
-
-    if (!dayDate?.date) {
-        alert(`Seleziona una data per il Giorno ${leg.day + 1} prima di richiedere le previsioni.`);
+// ===== METEO GIORNALIERO =====
+async function fetchWeatherDay(dayIdx) {
+    const dd = state.dayDates[dayIdx];
+    if (!dd?.date) {
+        alert(`Seleziona una data per il Giorno ${dayIdx + 1} prima di richiedere le previsioni.`);
         return;
     }
 
-    const container = document.getElementById(`seg-weather-${legIdx}`);
+    const geometry = getDayGeometry(dayIdx);
+    const stats    = getDayStats(dayIdx);
+    if (!geometry) return;
+
+    const container = document.getElementById(`seg-weather-day-${dayIdx}`);
     if (!container) return;
     container.innerHTML = `<div class="seg-loading">&#9203; Recupero previsioni in corso...</div>`;
 
@@ -542,11 +554,11 @@ async function fetchWeatherSegment(legIdx) {
         const res = await fetch("/api/weather-segment", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                geometry:     leg.geometry,
-                date:         dayDate.date,
-                time:         dayDate.time || "09:00",
-                duration_sec: leg.duration_sec,
-                distance_km:  leg.distance_km,
+                geometry,
+                date:         dd.date,
+                time:         dd.time || "09:00",
+                duration_sec: stats.duration_sec,
+                distance_km:  stats.distance_km,
                 interval_km:  state.sampleInterval,
             }),
         });
@@ -557,38 +569,36 @@ async function fetchWeatherSegment(legIdx) {
             return;
         }
 
-        renderSegmentWeather(legIdx, results, dayDate.time || "09:00", dayDate.date, leg.color);
-        renderWeatherMarkersOnMap(legIdx, results, leg.color);
+        const key   = `day-${dayIdx}`;
+        const color = LEG_COLORS[dayIdx % LEG_COLORS.length];
+        renderDayWeather(dayIdx, results, dd.time || "09:00", dd.date, color);
+        renderWeatherMarkersOnMap(key, results);
         setMapView("weather");
         showMapToggle();
-        if (state.legs[legIdx]) state.legs[legIdx].weatherFetched = true;
+        state.dayDates[dayIdx].weatherFetched = true;
     } catch (err) {
         if (container) container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
         console.error(err);
     } finally { showLoading(false); }
 }
 
-function renderSegmentWeather(legIdx, results, departureTime, dateStr, legColor) {
-    const container = document.getElementById(`seg-weather-${legIdx}`);
+function renderDayWeather(dayIdx, results, departureTime, dateStr, color) {
+    const container = document.getElementById(`seg-weather-day-${dayIdx}`);
     if (!container) return;
 
     const valid    = results.filter((r) => !r.error);
     const errCount = results.length - valid.length;
-
-    if (!valid.length) {
-        container.innerHTML = `<div class="seg-error">Nessun dato disponibile per questa tratta</div>`;
-        return;
-    }
+    if (!valid.length) { container.innerHTML = `<div class="seg-error">Nessun dato disponibile</div>`; return; }
 
     container.innerHTML = `
-      <div class="seg-weather-header" style="border-left-color:${legColor}">
+      <div class="seg-weather-header" style="border-left-color:${color}">
         Partenza ${fmtDate(dateStr)} ore ${departureTime} &mdash; ${valid.length} punti ogni ~${state.sampleInterval} km
         ${errCount > 0 ? `<span class="seg-warn">(${errCount} non disp.)</span>` : ""}
       </div>
-      <div class="seg-weather-row" id="seg-chips-${legIdx}"></div>
+      <div class="seg-weather-row" id="seg-chips-day-${dayIdx}"></div>
     `;
 
-    const row = container.querySelector(`#seg-chips-${legIdx}`);
+    const row = container.querySelector(`#seg-chips-day-${dayIdx}`);
     valid.forEach((pt) => {
         const chip = document.createElement("div");
         chip.className = "seg-weather-chip";
@@ -612,73 +622,19 @@ function renderSegmentWeather(legIdx, results, departureTime, dateStr, legColor)
     });
 }
 
-function makeWeatherIcon(pt) {
-    return L.divIcon({
-        html: `<div style="background:${tempColor(pt.temperature)};border:2.5px solid white;
-            border-radius:50%;width:28px;height:28px;display:flex;align-items:center;
-            justify-content:center;font-size:15px;box-shadow:0 2px 6px rgba(0,0,0,.38);
-            cursor:pointer;line-height:1;">${pt.weather_icon}</div>`,
-        className: "", iconSize: [28, 28], iconAnchor: [14, 14], popupAnchor: [0, -16],
-    });
-}
-
-function renderWeatherMarkersOnMap(legIdx, results, legColor) {
-    if (state.weatherGroups[legIdx]) state.weatherGroups[legIdx].clearLayers();
-    else state.weatherGroups[legIdx] = L.layerGroup();
-
-    const group = state.weatherGroups[legIdx];
-    results.filter((r) => !r.error).forEach((pt) => {
-        const marker = L.marker([pt.lat, pt.lon], { icon: makeWeatherIcon(pt) });
-        marker.bindPopup(`
-          <div style="min-width:160px;font-size:13px">
-            <div style="font-size:11px;color:#888;margin-bottom:4px">&#8987; ${pt.estimated_time} &mdash; km ${pt.dist_km}</div>
-            <div style="font-weight:700;font-size:16px">${pt.weather_icon} ${pt.temperature}°C</div>
-            <div style="color:#555;margin-bottom:5px">${escHtml(pt.weather_description)}</div>
-            <div>Percepita: ${pt.apparent_temperature}°C</div>
-            <div>&#128167; Pioggia: ${pt.precipitation_probability}%</div>
-            <div>&#128168; Vento: ${pt.windspeed} km/h ${compassDir(pt.winddirection)}</div>
-            <div>&#9729; Nuvole: ${pt.cloudcover}%</div>
-          </div>`);
-        group.addLayer(marker);
-    });
-    if (state.mapView === "weather") group.addTo(state.map);
-}
-
-function clearAllWeatherMarkers() {
-    state.weatherGroups.forEach((g) => g?.remove());
-    state.weatherGroups = [];
-}
-
-function clearAllTrafficMarkers() {
-    state.trafficGroups.forEach((g) => g?.remove());
-    state.trafficGroups = [];
-}
-
-// ===== TOGGLE LAYER MAPPA =====
-function setMapView(view) {
-    state.mapView = view;
-    state.weatherGroups.forEach((g) => { if (!g) return; view === "weather" ? g.addTo(state.map) : g.remove(); });
-    state.trafficGroups.forEach((g) => { if (!g) return; view === "traffic" ? g.addTo(state.map) : g.remove(); });
-    document.getElementById("btn-view-weather")?.classList.toggle("active", view === "weather");
-    document.getElementById("btn-view-traffic")?.classList.toggle("active", view === "traffic");
-}
-
-function showMapToggle() {
-    document.getElementById("map-layer-toggle")?.classList.remove("hidden");
-}
-
-// ===== TRAFFICO PER TRATTO =====
-async function fetchTrafficSegment(legIdx) {
-    const leg     = state.legs[legIdx];
-    if (!leg) return;
-    const dayDate = state.dayDates[leg.day];
-
-    if (!dayDate?.date) {
-        alert(`Seleziona una data per il Giorno ${leg.day + 1} prima di richiedere il traffico.`);
+// ===== TRAFFICO GIORNALIERO =====
+async function fetchTrafficDay(dayIdx) {
+    const dd = state.dayDates[dayIdx];
+    if (!dd?.date) {
+        alert(`Seleziona una data per il Giorno ${dayIdx + 1} prima di richiedere il traffico.`);
         return;
     }
 
-    const container = document.getElementById(`seg-traffic-${legIdx}`);
+    const geometry = getDayGeometry(dayIdx);
+    const stats    = getDayStats(dayIdx);
+    if (!geometry) return;
+
+    const container = document.getElementById(`seg-traffic-day-${dayIdx}`);
     if (!container) return;
     container.innerHTML = `<div class="seg-loading">&#9203; Stima traffico in corso...</div>`;
 
@@ -687,11 +643,11 @@ async function fetchTrafficSegment(legIdx) {
         const res = await fetch("/api/traffic-segment", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                geometry:     leg.geometry,
-                date:         dayDate.date,
-                time:         dayDate.time || "09:00",
-                duration_sec: leg.duration_sec,
-                distance_km:  leg.distance_km,
+                geometry,
+                date:         dd.date,
+                time:         dd.time || "09:00",
+                duration_sec: stats.duration_sec,
+                distance_km:  stats.distance_km,
                 profile:      state.mode,
                 interval_km:  state.sampleInterval,
             }),
@@ -699,25 +655,27 @@ async function fetchTrafficSegment(legIdx) {
         const data = await res.json();
 
         if (data.error) {
-            if (container) container.innerHTML = `<div class="seg-error">&#9888; ${escHtml(data.error)}</div>`;
+            container.innerHTML = `<div class="seg-error">&#9888; ${escHtml(data.error)}</div>`;
             return;
         }
 
+        const key     = `day-${dayIdx}`;
         const results = data.points || data;
         const meta    = data.points ? data : null;
-        renderSegmentTraffic(legIdx, results, dayDate.time || "09:00", dayDate.date, leg.color, meta);
-        renderTrafficMarkersOnMap(legIdx, results);
+        const color   = LEG_COLORS[dayIdx % LEG_COLORS.length];
+        renderDayTraffic(dayIdx, results, dd.time || "09:00", dd.date, color, meta);
+        renderTrafficMarkersOnMap(key, results);
         setMapView("traffic");
         showMapToggle();
-        if (state.legs[legIdx]) state.legs[legIdx].trafficFetched = true;
+        state.dayDates[dayIdx].trafficFetched = true;
     } catch (err) {
         if (container) container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
         console.error(err);
     } finally { showLoading(false); }
 }
 
-function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor, meta) {
-    const container = document.getElementById(`seg-traffic-${legIdx}`);
+function renderDayTraffic(dayIdx, results, departureTime, dateStr, color, meta) {
+    const container = document.getElementById(`seg-traffic-day-${dayIdx}`);
     if (!container) return;
 
     const src       = meta?.source || results[0]?.source || "heuristic";
@@ -729,14 +687,14 @@ function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor,
         ? `&nbsp;&mdash; ritardo atteso <strong>+${meta.leg_delay_min} min</strong>` : "";
 
     container.innerHTML = `
-      <div class="seg-weather-header" style="border-left-color:${legColor}">
+      <div class="seg-weather-header" style="border-left-color:${color}">
         &#128678; ${fmtDate(dateStr)} ore ${departureTime} &mdash;
         ${results.length} punti ogni ~${state.sampleInterval} km${delayNote} ${sourceBadge}
       </div>
-      <div class="seg-weather-row" id="seg-traffic-chips-${legIdx}"></div>
+      <div class="seg-weather-row" id="seg-traffic-chips-day-${dayIdx}"></div>
     `;
 
-    const row = container.querySelector(`#seg-traffic-chips-${legIdx}`);
+    const row = container.querySelector(`#seg-traffic-chips-day-${dayIdx}`);
     results.forEach((pt) => {
         const chip = document.createElement("div");
         chip.className = "seg-traffic-chip";
@@ -756,6 +714,39 @@ function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor,
     });
 }
 
+// ===== ICONE MAPPA =====
+function makeWeatherIcon(pt) {
+    return L.divIcon({
+        html: `<div style="background:${tempColor(pt.temperature)};border:2.5px solid white;
+            border-radius:50%;width:28px;height:28px;display:flex;align-items:center;
+            justify-content:center;font-size:15px;box-shadow:0 2px 6px rgba(0,0,0,.38);
+            cursor:pointer;line-height:1;">${pt.weather_icon}</div>`,
+        className: "", iconSize: [28, 28], iconAnchor: [14, 14], popupAnchor: [0, -16],
+    });
+}
+
+function renderWeatherMarkersOnMap(key, results) {
+    if (state.weatherGroups[key]) state.weatherGroups[key].clearLayers();
+    else state.weatherGroups[key] = L.layerGroup();
+
+    const group = state.weatherGroups[key];
+    results.filter((r) => !r.error).forEach((pt) => {
+        const marker = L.marker([pt.lat, pt.lon], { icon: makeWeatherIcon(pt) });
+        marker.bindPopup(`
+          <div style="min-width:160px;font-size:13px">
+            <div style="font-size:11px;color:#888;margin-bottom:4px">&#8987; ${pt.estimated_time} &mdash; km ${pt.dist_km}</div>
+            <div style="font-weight:700;font-size:16px">${pt.weather_icon} ${pt.temperature}°C</div>
+            <div style="color:#555;margin-bottom:5px">${escHtml(pt.weather_description)}</div>
+            <div>Percepita: ${pt.apparent_temperature}°C</div>
+            <div>&#128167; Pioggia: ${pt.precipitation_probability}%</div>
+            <div>&#128168; Vento: ${pt.windspeed} km/h ${compassDir(pt.winddirection)}</div>
+            <div>&#9729; Nuvole: ${pt.cloudcover}%</div>
+          </div>`);
+        group.addLayer(marker);
+    });
+    if (state.mapView === "weather") group.addTo(state.map);
+}
+
 function makeTrafficIcon(pt) {
     return L.divIcon({
         html: `<div style="background:${pt.traffic_color};border:2.5px solid white;border-radius:5px;
@@ -766,11 +757,11 @@ function makeTrafficIcon(pt) {
     });
 }
 
-function renderTrafficMarkersOnMap(legIdx, results) {
-    if (state.trafficGroups[legIdx]) state.trafficGroups[legIdx].clearLayers();
-    else state.trafficGroups[legIdx] = L.layerGroup();
+function renderTrafficMarkersOnMap(key, results) {
+    if (state.trafficGroups[key]) state.trafficGroups[key].clearLayers();
+    else state.trafficGroups[key] = L.layerGroup();
 
-    const group = state.trafficGroups[legIdx];
+    const group = state.trafficGroups[key];
     results.forEach((pt) => {
         const marker = L.marker([pt.lat, pt.lon], { icon: makeTrafficIcon(pt) });
         const speedInfo = pt.source === "tomtom"
@@ -785,6 +776,29 @@ function renderTrafficMarkersOnMap(legIdx, results) {
         group.addLayer(marker);
     });
     if (state.mapView === "traffic") group.addTo(state.map);
+}
+
+function clearAllWeatherMarkers() {
+    Object.values(state.weatherGroups).forEach((g) => g?.remove());
+    state.weatherGroups = {};
+}
+
+function clearAllTrafficMarkers() {
+    Object.values(state.trafficGroups).forEach((g) => g?.remove());
+    state.trafficGroups = {};
+}
+
+// ===== TOGGLE LAYER MAPPA =====
+function setMapView(view) {
+    state.mapView = view;
+    Object.values(state.weatherGroups).forEach((g) => { if (!g) return; view === "weather" ? g.addTo(state.map) : g.remove(); });
+    Object.values(state.trafficGroups).forEach((g) => { if (!g) return; view === "traffic" ? g.addTo(state.map) : g.remove(); });
+    document.getElementById("btn-view-weather")?.classList.toggle("active", view === "weather");
+    document.getElementById("btn-view-traffic")?.classList.toggle("active", view === "traffic");
+}
+
+function showMapToggle() {
+    document.getElementById("map-layer-toggle")?.classList.remove("hidden");
 }
 
 // ===== REVERSE GEOCODE =====
