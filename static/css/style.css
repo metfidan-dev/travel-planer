@@ -532,9 +532,16 @@ body {
     transition: opacity 0.15s;
 }
 .import-choice-btn:hover { opacity: 0.85; }
-.import-choice-btn.danger  { background: #e74c3c; color: white; }
-.import-choice-btn.primary { background: #2980b9; color: white; }
-.import-choice-btn.cancel  { background: #ecf0f1; color: #666; }
+.import-choice-btn.danger    { background: #e74c3c; color: white; }
+.import-choice-btn.primary   { background: #2980b9; color: white; }
+.import-choice-btn.secondary { background: #e67e22; color: white; }
+.import-choice-btn.cancel    { background: #ecf0f1; color: #666; }
+
+.import-day-select {
+    width: 100%; padding: 9px 10px; font-size: 14px;
+    border: 1px solid #ccc; border-radius: 8px;
+    background: white; cursor: pointer;
+}
 
 /* ===== METEO TRATTA: chip orizzontali ===== */
 .seg-weather-container { margin-top: 10px; }

@@ -885,21 +885,50 @@ function toggleImportSection() {
 
 function showImportChoiceModal() {
     return new Promise((resolve) => {
+        const days    = computeWaypointDays();
+        const numDays = Math.max(...days) + 1;
+
         const overlay = document.createElement("div");
         overlay.className = "import-choice-overlay";
-        overlay.innerHTML = `
-            <div class="import-choice-box">
+        document.body.appendChild(overlay);
+
+        function renderStep1() {
+            overlay.querySelector(".import-choice-box")
+                ? null
+                : overlay.insertAdjacentHTML("beforeend", "<div class='import-choice-box'></div>");
+            overlay.querySelector(".import-choice-box").innerHTML = `
                 <p>Esiste già un percorso.<br>Cosa vuoi fare con il nuovo link?</p>
                 <div class="import-choice-btns">
-                    <button class="import-choice-btn primary" id="btn-new-day-import">&#128197; Aggiungi come nuovo giorno</button>
-                    <button class="import-choice-btn danger"  id="btn-overwrite-import">&#9998; Sovrascrivi percorso esistente</button>
-                    <button class="import-choice-btn cancel"  id="btn-cancel-import">Annulla</button>
-                </div>
-            </div>`;
-        document.body.appendChild(overlay);
-        overlay.querySelector("#btn-new-day-import").onclick  = () => { overlay.remove(); resolve("new-day");   };
-        overlay.querySelector("#btn-overwrite-import").onclick = () => { overlay.remove(); resolve("overwrite"); };
-        overlay.querySelector("#btn-cancel-import").onclick   = () => { overlay.remove(); resolve(null);        };
+                    <button class="import-choice-btn primary"   id="btn-new-day-import">&#128197; Aggiungi come nuovo giorno</button>
+                    <button class="import-choice-btn danger"    id="btn-overwrite-import">&#9998; Sovrascrivi tutto il percorso</button>
+                    <button class="import-choice-btn secondary" id="btn-replace-day-import">&#8635; Sostituisci un giorno specifico</button>
+                    <button class="import-choice-btn cancel"    id="btn-cancel-import">Annulla</button>
+                </div>`;
+            overlay.querySelector("#btn-new-day-import").onclick     = () => { overlay.remove(); resolve("new-day");   };
+            overlay.querySelector("#btn-overwrite-import").onclick   = () => { overlay.remove(); resolve("overwrite"); };
+            overlay.querySelector("#btn-cancel-import").onclick      = () => { overlay.remove(); resolve(null);        };
+            overlay.querySelector("#btn-replace-day-import").onclick = renderStep2;
+        }
+
+        function renderStep2() {
+            const opts = Array.from({ length: numDays }, (_, i) =>
+                `<option value="${i}">Giorno ${i + 1}</option>`).join("");
+            overlay.querySelector(".import-choice-box").innerHTML = `
+                <p>Seleziona il giorno da sostituire:</p>
+                <select class="import-day-select" id="replace-day-select">${opts}</select>
+                <div class="import-choice-btns" style="margin-top:14px">
+                    <button class="import-choice-btn danger"  id="btn-confirm-replace">Sostituisci</button>
+                    <button class="import-choice-btn cancel"  id="btn-back-import">&#8592; Indietro</button>
+                </div>`;
+            overlay.querySelector("#btn-confirm-replace").onclick = () => {
+                const day = parseInt(overlay.querySelector("#replace-day-select").value, 10);
+                overlay.remove();
+                resolve({ replaceDay: day });
+            };
+            overlay.querySelector("#btn-back-import").onclick = renderStep1;
+        }
+
+        renderStep1();
     });
 }
 
@@ -943,8 +972,37 @@ async function importGmapsUrl() {
             state.waypoints = [];
             wpCounter = 0;
             data.forEach((wp) => addWaypoint(wp.name || "", wp.lat, wp.lon));
-        } else {
+        } else if (importMode === "new-day") {
             data.forEach((wp, i) => addWaypoint(wp.name || "", wp.lat, wp.lon, i === 0));
+        } else if (importMode && typeof importMode === "object" && "replaceDay" in importMode) {
+            const d       = importMode.replaceDay;
+            const allDays = computeWaypointDays();
+
+            // remove markers for replaced day
+            state.waypoints.forEach((wp, i) => { if (allDays[i] === d) removeMarker(wp.id); });
+
+            // clear weather/traffic for that day
+            if (state.weatherGroups[`day-${d}`]) {
+                state.weatherGroups[`day-${d}`].forEach((m) => m.remove());
+                delete state.weatherGroups[`day-${d}`];
+            }
+            if (state.trafficGroups[`day-${d}`]) {
+                state.trafficGroups[`day-${d}`].forEach((m) => m.remove());
+                delete state.trafficGroups[`day-${d}`];
+            }
+            if (state.dayDates[d]) delete state.dayDates[d];
+
+            const before = state.waypoints.filter((_, i) => allDays[i] < d);
+            const after  = state.waypoints.filter((_, i) => allDays[i] > d);
+
+            const newWps = data.map((wp, i) => {
+                const id = ++wpCounter;
+                return { id, name: wp.name || "", lat: wp.lat || null, lon: wp.lon || null,
+                         startNewDay: i === 0 && d > 0 };
+            });
+
+            state.waypoints = [...before, ...newWps, ...after];
+            newWps.forEach((wp) => { if (wp.lat && wp.lon) syncMarker(wp.id); });
         }
 
         renderWaypoints();
