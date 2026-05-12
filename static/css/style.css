@@ -322,6 +322,30 @@ body {
     margin-top: 3px;
 }
 
+/* ===== SAVE / LOAD ITINERARY ===== */
+#save-load-section { padding: 8px 12px 4px; }
+#save-load-btns { display: flex; gap: 8px; }
+#btn-export-itinerary,
+#btn-import-itinerary {
+    flex: 1;
+    padding: 8px 10px;
+    font-size: 12px; font-weight: 600;
+    border-radius: 8px; cursor: pointer;
+    text-align: center; transition: all 0.15s;
+    white-space: nowrap;
+}
+#btn-export-itinerary {
+    background: #f0f4ff; color: #3a57c9;
+    border: 1px dashed #3a57c9;
+}
+#btn-export-itinerary:hover { background: #dce6ff; }
+#btn-import-itinerary {
+    background: #f0fff4; color: #1a7f4b;
+    border: 1px dashed #1a7f4b;
+    display: flex; align-items: center; justify-content: center;
+}
+#btn-import-itinerary:hover { background: #d0f5e1; }
+
 /* ===== IMPORT GOOGLE MAPS ===== */
 #import-gmaps-section { padding: 8px 12px 4px; }
 

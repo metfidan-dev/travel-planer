@@ -540,9 +540,10 @@ async function updateDayDate(dayIdx, key, val) {
 
 // ===== DATE PROPAGATION =====
 function dateAddDays(dateStr, n) {
-    const d = new Date(dateStr + "T00:00:00");
-    d.setDate(d.getDate() + n);
-    return d.toISOString().slice(0, 10);
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const date = new Date(Date.UTC(y, m - 1, d));
+    date.setUTCDate(date.getUTCDate() + n);
+    return date.toISOString().slice(0, 10);
 }
 
 function getMaxDay() {
@@ -1093,6 +1094,98 @@ function renderCompareChips(containerId, results) {
         ].join("\n");
         row.appendChild(chip);
     });
+}
+
+// ===== SAVE / LOAD ITINERARY =====
+function exportItinerary() {
+    if (!state.waypoints.some((w) => w.lat && w.lon)) {
+        alert("Nessun itinerario da esportare. Aggiungi almeno 2 tappe.");
+        return;
+    }
+    const data = {
+        version:        1,
+        mode:           state.mode,
+        curvePref:      state.curvePref,
+        sampleInterval: state.sampleInterval,
+        waypoints: state.waypoints.map((wp) => ({
+            name:        wp.name,
+            lat:         wp.lat,
+            lon:         wp.lon,
+            startNewDay: wp.startNewDay || false,
+        })),
+        legCurves: state.legs.map((l) => l.curves || 1),
+        dayDates: Object.fromEntries(
+            Object.entries(state.dayDates)
+                .filter(([, v]) => v.date)
+                .map(([k, v]) => [k, { date: v.date, time: v.time || "09:00", manualDate: v.manualDate || false }])
+        ),
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    const slug = (data.waypoints[0]?.name || "viaggio").replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20);
+    a.download = `itinerario-${slug}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+async function importItinerary(file) {
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        if (data.version !== 1 || !Array.isArray(data.waypoints) || data.waypoints.length < 2) {
+            alert("File non valido o non riconosciuto come itinerario Travel Planner.");
+            return;
+        }
+        if (!confirm("Questo sostituirà l'itinerario corrente. Continuare?")) return;
+
+        clearTimeout(state.autoRecalcTimer);
+        Object.keys(state.markers).forEach((k) => removeMarker(Number(k)));
+        clearLegs();
+        state.waypoints = [];
+        wpCounter = 0;
+
+        if (data.mode) {
+            state.mode = data.mode;
+            document.querySelectorAll(".mode-btn").forEach((b) =>
+                b.classList.toggle("active", b.dataset.mode === data.mode));
+            document.getElementById("curves-control")?.classList.toggle("hidden", data.mode !== "motorcycle");
+        }
+        if (data.sampleInterval) {
+            state.sampleInterval = data.sampleInterval;
+            const sel = document.getElementById("sample-interval-select");
+            if (sel) sel.value = data.sampleInterval;
+        }
+        if (data.curvePref) state.curvePref = data.curvePref;
+
+        data.waypoints.forEach((wp) => addWaypoint(wp.name || "", wp.lat, wp.lon, wp.startNewDay || false));
+
+        if (data.dayDates) {
+            Object.entries(data.dayDates).forEach(([k, v]) => {
+                state.dayDates[parseInt(k, 10)] = {
+                    date: v.date, time: v.time || "09:00",
+                    manualDate: v.manualDate || false,
+                    weatherFetched: false, trafficFetched: false,
+                };
+            });
+        }
+
+        renderWaypoints();
+        const validLL = state.waypoints.filter((w) => w.lat && w.lon).map((w) => [w.lat, w.lon]);
+        if (validLL.length) state.map.fitBounds(L.latLngBounds(validLL), { padding: [40, 40] });
+
+        const curves = data.mode === "motorcycle" ? (data.legCurves || []) : null;
+        await calculateRoute(curves);
+
+    } catch (err) {
+        alert("Errore durante l'importazione: " + (err.message || err));
+        console.error(err);
+    } finally {
+        const inp = document.getElementById("import-file-input");
+        if (inp) inp.value = "";
+    }
 }
 
 // ===== IMPORT GOOGLE MAPS =====

@@ -39,6 +39,16 @@
 
         <div id="sidebar-body">
 
+            <!-- Salva / Carica itinerario -->
+            <div id="save-load-section">
+                <div id="save-load-btns">
+                    <button id="btn-export-itinerary" onclick="exportItinerary()">&#128190; Salva itinerario</button>
+                    <label id="btn-import-itinerary" for="import-file-input">&#128193; Carica itinerario</label>
+                    <input id="import-file-input" type="file" accept=".json" style="display:none"
+                           onchange="importItinerary(this.files[0])" />
+                </div>
+            </div>
+
             <!-- Importa da Google Maps -->
             <div id="import-gmaps-section">
                 <button id="import-gmaps-toggle" onclick="toggleImportSection()">
