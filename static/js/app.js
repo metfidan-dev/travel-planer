@@ -883,6 +883,26 @@ function toggleImportSection() {
     if (open) document.getElementById("gmaps-url-input").focus();
 }
 
+function showImportChoiceModal() {
+    return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.className = "import-choice-overlay";
+        overlay.innerHTML = `
+            <div class="import-choice-box">
+                <p>Esiste già un percorso.<br>Cosa vuoi fare con il nuovo link?</p>
+                <div class="import-choice-btns">
+                    <button class="import-choice-btn primary" id="btn-new-day-import">&#128197; Aggiungi come nuovo giorno</button>
+                    <button class="import-choice-btn danger"  id="btn-overwrite-import">&#9998; Sovrascrivi percorso esistente</button>
+                    <button class="import-choice-btn cancel"  id="btn-cancel-import">Annulla</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.querySelector("#btn-new-day-import").onclick  = () => { overlay.remove(); resolve("new-day");   };
+        overlay.querySelector("#btn-overwrite-import").onclick = () => { overlay.remove(); resolve("overwrite"); };
+        overlay.querySelector("#btn-cancel-import").onclick   = () => { overlay.remove(); resolve(null);        };
+    });
+}
+
 async function importGmapsUrl() {
     const input = document.getElementById("gmaps-url-input");
     const url   = input.value.trim();
@@ -906,17 +926,31 @@ async function importGmapsUrl() {
             return;
         }
 
-        clearTimeout(state.autoRecalcTimer);
-        Object.keys(state.markers).forEach((k) => removeMarker(Number(k)));
-        clearLegs();
-        state.waypoints = [];
-        wpCounter = 0;
+        const hasExisting = state.waypoints.some((w) => w.lat && w.lon);
+        let importMode = "overwrite";
+        if (hasExisting) {
+            showLoading(false);
+            importMode = await showImportChoiceModal();
+            showLoading(true);
+            if (!importMode) return;
+        }
 
-        data.forEach((wp) => addWaypoint(wp.name || "", wp.lat, wp.lon));
+        clearTimeout(state.autoRecalcTimer);
+        clearLegs();
+
+        if (importMode === "overwrite") {
+            Object.keys(state.markers).forEach((k) => removeMarker(Number(k)));
+            state.waypoints = [];
+            wpCounter = 0;
+            data.forEach((wp) => addWaypoint(wp.name || "", wp.lat, wp.lon));
+        } else {
+            data.forEach((wp, i) => addWaypoint(wp.name || "", wp.lat, wp.lon, i === 0));
+        }
+
         renderWaypoints();
 
-        const validLL = data.filter((w) => w.lat && w.lon).map((w) => [w.lat, w.lon]);
-        if (validLL.length) state.map.fitBounds(L.latLngBounds(validLL), { padding: [40, 40] });
+        const allLL = state.waypoints.filter((w) => w.lat && w.lon).map((w) => [w.lat, w.lon]);
+        if (allLL.length) state.map.fitBounds(L.latLngBounds(allLL), { padding: [40, 40] });
 
         document.getElementById("import-gmaps-form").classList.add("hidden");
         document.getElementById("import-gmaps-toggle").classList.remove("open");
