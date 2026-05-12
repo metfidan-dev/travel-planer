@@ -487,9 +487,57 @@ body {
 .leg-card-btns .btn-weather-seg,
 .leg-card-btns .btn-traffic-seg { flex: 1; }
 
-.legs-day-btns { display: flex; gap: 6px; margin-top: 7px; }
+.legs-day-btns { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
 .legs-day-btns .btn-weather-seg,
 .legs-day-btns .btn-traffic-seg { flex: 1; }
+
+.btn-compare-seg {
+    padding: 5px 9px;
+    background: #16a085; color: white;
+    border: none; border-radius: 6px;
+    cursor: pointer; font-size: 11px; font-weight: 600;
+    white-space: nowrap; transition: background 0.15s;
+    flex-shrink: 0;
+}
+.btn-compare-seg:hover  { background: #1abc9c; }
+.btn-compare-seg.active { background: #0e6655; }
+
+/* Auto-propagated date input visual hint */
+.wp-date-input.auto-propagated {
+    border-color: #74b9ff;
+    background: #eaf4ff;
+}
+
+/* ===== COMPARE PANEL ===== */
+.seg-compare-panel {
+    margin-top: 10px;
+    border-top: 1px dashed #dde;
+    padding-top: 10px;
+}
+.compare-row { margin-bottom: 10px; }
+.compare-row:last-child { margin-bottom: 0; }
+.compare-row-label {
+    font-size: 11px; font-weight: 700; color: #888;
+    margin-bottom: 4px; letter-spacing: 0.3px;
+}
+.compare-row-today {
+    background: #f8f9fa; border-radius: 6px;
+    padding: 5px 6px; margin-left: -6px; margin-right: -6px;
+}
+.compare-chips-row {
+    display: flex; gap: 5px; overflow-x: auto;
+    padding-bottom: 3px;
+}
+.compare-chips-row::-webkit-scrollbar { height: 3px; }
+.compare-chips-row::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
+.compare-chip {
+    width: 54px !important;
+    padding: 4px 3px !important;
+}
+.compare-chip .chip-dist  { font-size: 8px; }
+.compare-chip .chip-icon  { font-size: 14px; }
+.compare-chip .chip-temp  { font-size: 11px; font-weight: 700; }
+.compare-chip .chip-precip { font-size: 8px; }
 
 .btn-weather-seg {
     padding: 5px 9px;
@@ -536,6 +584,12 @@ body {
 .import-choice-btn.primary   { background: #2980b9; color: white; }
 .import-choice-btn.secondary { background: #e67e22; color: white; }
 .import-choice-btn.cancel    { background: #ecf0f1; color: #666; }
+
+.conflict-date-list {
+    text-align: left; margin: 0 0 14px; padding-left: 18px;
+    font-size: 13px; color: #555;
+}
+.conflict-date-list li { margin-bottom: 5px; }
 
 .import-day-select {
     width: 100%; padding: 9px 10px; font-size: 14px;

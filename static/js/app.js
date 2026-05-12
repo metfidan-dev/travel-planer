@@ -12,13 +12,14 @@ const state = {
     legLayers: [],
     weatherGroups: {},   // keyed by "day-N"
     trafficGroups: {},   // keyed by "day-N"
+    compareWeather: {},  // keyed by "day-N"
     mapView: "none",
     mode: "driving",
     curvePref: 1,
     sampleInterval: 20,
     searchTimer: null,
     autoRecalcTimer: null,
-    dayDates: {},        // {N: {date, time, weatherFetched, trafficFetched}}
+    dayDates: {},        // {N: {date, time, manualDate, weatherFetched, trafficFetched}}
 };
 
 // ===== INIT =====
@@ -456,6 +457,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
         const sep = document.createElement("div");
         sep.className = "legs-day-header";
         sep.style.borderLeftColor = dayColor;
+        const autoClass = (dd.date && !dd.manualDate) ? " auto-propagated" : "";
         sep.innerHTML = `
           <div class="legs-day-info">
             <span class="legs-day-dot" style="background:${dayColor}"></span>
@@ -463,7 +465,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
             <span class="legs-day-km">${dayTotalKm} km</span>
           </div>
           <div class="legs-day-datetime">
-            <input class="wp-date-input" type="date"
+            <input id="day-date-input-${d}" class="wp-date-input${autoClass}" type="date"
               value="${dd.date}" min="${todayStr()}" max="${maxDateStr()}"
               onchange="updateDayDate(${d}, 'date', this.value)" />
             <input class="wp-time-input" type="time"
@@ -473,9 +475,12 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
           <div class="legs-day-btns">
             <button class="btn-weather-seg" onclick="fetchWeatherDay(${d})">&#127780; Meteo</button>
             <button class="btn-traffic-seg" onclick="fetchTrafficDay(${d})">&#128678; Traffico</button>
+            <button class="btn-compare-seg${dd.weatherFetched ? "" : " hidden"}" id="btn-compare-day-${d}"
+                    onclick="toggleCompare(${d})">&#9878; Compara</button>
           </div>
           <div class="seg-weather-container" id="seg-weather-day-${d}"></div>
           <div class="seg-traffic-container" id="seg-traffic-day-${d}"></div>
+          <div class="seg-compare-panel hidden" id="seg-compare-day-${d}"></div>
         `;
         legsList.appendChild(sep);
 
@@ -520,9 +525,110 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
 }
 
 // ===== UPDATE HELPERS =====
-function updateDayDate(dayIdx, key, val) {
-    if (!state.dayDates[dayIdx]) state.dayDates[dayIdx] = { date: "", time: "09:00", weatherFetched: false, trafficFetched: false };
+async function updateDayDate(dayIdx, key, val) {
+    if (!state.dayDates[dayIdx])
+        state.dayDates[dayIdx] = { date: "", time: "09:00", manualDate: false, weatherFetched: false, trafficFetched: false };
     state.dayDates[dayIdx][key] = val;
+    if (key === "date") {
+        state.dayDates[dayIdx].manualDate      = true;
+        state.dayDates[dayIdx].weatherFetched  = false;
+        state.dayDates[dayIdx].trafficFetched  = false;
+        delete state.compareWeather[`day-${dayIdx}`];
+        await propagateDates(dayIdx);
+    }
+}
+
+// ===== DATE PROPAGATION =====
+function dateAddDays(dateStr, n) {
+    const d = new Date(dateStr + "T00:00:00");
+    d.setDate(d.getDate() + n);
+    return d.toISOString().slice(0, 10);
+}
+
+function getMaxDay() {
+    return state.legs.reduce((m, l) => Math.max(m, l.day), -1);
+}
+
+function updateDayDateInputsInDOM() {
+    const maxDay = getMaxDay();
+    for (let d = 0; d <= maxDay; d++) {
+        const input = document.getElementById(`day-date-input-${d}`);
+        if (!input) continue;
+        const dd = state.dayDates[d];
+        if (dd?.date) input.value = dd.date;
+        input.classList.toggle("auto-propagated", !!dd && !dd.manualDate && !!dd.date);
+    }
+}
+
+async function propagateDates(anchorDay) {
+    const anchor = state.dayDates[anchorDay];
+    if (!anchor?.date) return;
+    const maxDay = getMaxDay();
+    if (maxDay < 0) return;
+
+    const toUpdate  = {};   // dayIdx → newDateStr (non-manual days)
+    const conflicts = [];   // { day, current, proposed }
+
+    for (let d = anchorDay + 1; d <= maxDay; d++) {
+        const newDate = dateAddDays(anchor.date, d - anchorDay);
+        const dd      = state.dayDates[d];
+        if (dd?.manualDate) {
+            if (dd.date !== newDate) conflicts.push({ day: d, current: dd.date, proposed: newDate });
+            break;
+        }
+        toUpdate[d] = newDate;
+    }
+    for (let d = anchorDay - 1; d >= 0; d--) {
+        const newDate = dateAddDays(anchor.date, d - anchorDay);
+        const dd      = state.dayDates[d];
+        if (dd?.manualDate) {
+            if (dd.date !== newDate) conflicts.push({ day: d, current: dd.date, proposed: newDate });
+            break;
+        }
+        toUpdate[d] = newDate;
+    }
+
+    if (!Object.keys(toUpdate).length && !conflicts.length) return;
+
+    let overwrite = false;
+    if (conflicts.length) overwrite = await showPropagateConflictModal(conflicts);
+
+    const allToUpdate = { ...toUpdate };
+    if (overwrite) conflicts.forEach(({ day, proposed }) => { allToUpdate[day] = proposed; });
+
+    Object.entries(allToUpdate).forEach(([d, newDate]) => {
+        const dNum = parseInt(d, 10);
+        if (!state.dayDates[dNum]) state.dayDates[dNum] = { time: "09:00" };
+        state.dayDates[dNum].date           = newDate;
+        state.dayDates[dNum].manualDate     = false;
+        state.dayDates[dNum].weatherFetched = false;
+        state.dayDates[dNum].trafficFetched = false;
+        delete state.compareWeather[`day-${dNum}`];
+    });
+
+    updateDayDateInputsInDOM();
+}
+
+function showPropagateConflictModal(conflicts) {
+    return new Promise((resolve) => {
+        const list = conflicts.map(({ day, current, proposed }) =>
+            `<li>Giorno ${day + 1}: <strong>${fmtDate(current)}</strong> &rarr; <strong>${fmtDate(proposed)}</strong></li>`
+        ).join("");
+        const overlay = document.createElement("div");
+        overlay.className = "import-choice-overlay";
+        overlay.innerHTML = `
+            <div class="import-choice-box">
+                <p>La propagazione modificherebbe date già impostate:</p>
+                <ul class="conflict-date-list">${list}</ul>
+                <div class="import-choice-btns">
+                    <button class="import-choice-btn danger" id="btn-conflict-yes">Sovrascrivi</button>
+                    <button class="import-choice-btn cancel" id="btn-conflict-no">Mantieni</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.querySelector("#btn-conflict-yes").onclick = () => { overlay.remove(); resolve(true);  };
+        overlay.querySelector("#btn-conflict-no").onclick  = () => { overlay.remove(); resolve(false); };
+    });
 }
 
 function updateLegCurves(legIdx, val) {
@@ -576,6 +682,11 @@ async function fetchWeatherDay(dayIdx) {
         setMapView("weather");
         showMapToggle();
         state.dayDates[dayIdx].weatherFetched = true;
+        delete state.compareWeather[`day-${dayIdx}`];
+        const cmpBtn = document.getElementById(`btn-compare-day-${dayIdx}`);
+        if (cmpBtn) cmpBtn.classList.remove("hidden");
+        const cmpPanel = document.getElementById(`seg-compare-day-${dayIdx}`);
+        if (cmpPanel) { cmpPanel.classList.add("hidden"); cmpPanel.innerHTML = ""; }
     } catch (err) {
         if (container) container.innerHTML = `<div class="seg-error">&#9888; Errore di connessione</div>`;
         console.error(err);
@@ -820,9 +931,10 @@ function clearLegs() {
     state.legLayers = [];
     clearAllWeatherMarkers();
     clearAllTrafficMarkers();
-    state.mapView  = "none";
-    state.legs     = [];
-    state.dayDates = {};
+    state.mapView      = "none";
+    state.legs         = [];
+    state.dayDates     = {};
+    state.compareWeather = {};
     document.getElementById("legs-panel")?.remove();
     document.getElementById("map-layer-toggle")?.classList.add("hidden");
 }
@@ -872,6 +984,115 @@ function exportToGoogleMaps() {
     let url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=${modeMap[state.mode] || "driving"}`;
     if (mid) url += `&waypoints=${encodeURIComponent(mid)}`;
     window.open(url, "_blank");
+}
+
+// ===== COMPARE WEATHER =====
+async function toggleCompare(dayIdx) {
+    const panel = document.getElementById(`seg-compare-day-${dayIdx}`);
+    if (!panel) return;
+    const btn = document.getElementById(`btn-compare-day-${dayIdx}`);
+    if (!panel.classList.contains("hidden")) {
+        panel.classList.add("hidden");
+        if (btn) btn.classList.remove("active");
+        return;
+    }
+    panel.classList.remove("hidden");
+    if (btn) btn.classList.add("active");
+    if (state.compareWeather[`day-${dayIdx}`]) return; // already fetched
+    await fetchCompareWeather(dayIdx);
+}
+
+async function fetchWeatherForDate(geometry, date, time, stats) {
+    const res = await fetch("/api/weather-segment", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            geometry, date, time,
+            duration_sec: stats.duration_sec,
+            distance_km:  stats.distance_km,
+            interval_km:  state.sampleInterval,
+        }),
+    });
+    return await res.json();
+}
+
+async function fetchCompareWeather(dayIdx) {
+    const dd = state.dayDates[dayIdx];
+    if (!dd?.date) return;
+    const panel = document.getElementById(`seg-compare-day-${dayIdx}`);
+    if (!panel) return;
+    panel.innerHTML = `<div class="seg-loading">&#9203; Confronto meteo in corso...</div>`;
+
+    const geometry = getDayGeometry(dayIdx);
+    const stats    = getDayStats(dayIdx);
+    if (!geometry) { panel.innerHTML = `<div class="seg-error">Geometria non disponibile</div>`; return; }
+
+    const prevDate = dateAddDays(dd.date, -1);
+    const nextDate = dateAddDays(dd.date,  1);
+    const time     = dd.time || "09:00";
+
+    showLoading(true);
+    try {
+        const [prevRes, currRes, nextRes] = await Promise.all([
+            fetchWeatherForDate(geometry, prevDate, time, stats),
+            fetchWeatherForDate(geometry, dd.date,  time, stats),
+            fetchWeatherForDate(geometry, nextDate, time, stats),
+        ]);
+        state.compareWeather[`day-${dayIdx}`] = { prev: prevRes, curr: currRes, next: nextRes };
+        renderComparePanel(dayIdx, prevDate, prevRes, dd.date, currRes, nextDate, nextRes);
+    } catch (err) {
+        panel.innerHTML = `<div class="seg-error">&#9888; Errore durante il confronto</div>`;
+        console.error(err);
+    } finally { showLoading(false); }
+}
+
+function renderComparePanel(dayIdx, prevDate, prevRes, currDate, currRes, nextDate, nextRes) {
+    const panel = document.getElementById(`seg-compare-day-${dayIdx}`);
+    if (!panel) return;
+    const color = LEG_COLORS[dayIdx % LEG_COLORS.length];
+    panel.innerHTML = `
+        <div class="compare-row">
+            <div class="compare-row-label">&#9664; ${fmtDate(prevDate)}</div>
+            <div class="compare-chips-row" id="cmp-prev-${dayIdx}"></div>
+        </div>
+        <div class="compare-row compare-row-today">
+            <div class="compare-row-label" style="color:${color}">&#9679; ${fmtDate(currDate)} (selezionato)</div>
+            <div class="compare-chips-row" id="cmp-curr-${dayIdx}"></div>
+        </div>
+        <div class="compare-row">
+            <div class="compare-row-label">&#9654; ${fmtDate(nextDate)}</div>
+            <div class="compare-chips-row" id="cmp-next-${dayIdx}"></div>
+        </div>`;
+    renderCompareChips(`cmp-prev-${dayIdx}`, prevRes);
+    renderCompareChips(`cmp-curr-${dayIdx}`, currRes);
+    renderCompareChips(`cmp-next-${dayIdx}`, nextRes);
+}
+
+function renderCompareChips(containerId, results) {
+    const row = document.getElementById(containerId);
+    if (!row) return;
+    if (!Array.isArray(results) || !results.length) {
+        row.innerHTML = `<span class="seg-error">Dati non disponibili</span>`; return;
+    }
+    const valid = results.filter((r) => !r.error);
+    if (!valid.length) { row.innerHTML = `<span class="seg-error">Dati non disponibili</span>`; return; }
+    valid.forEach((pt) => {
+        const chip = document.createElement("div");
+        chip.className = "seg-weather-chip compare-chip";
+        chip.style.borderTopColor = tempColor(pt.temperature);
+        chip.innerHTML = `
+            <div class="chip-dist">${pt.dist_km}&nbsp;km</div>
+            <div class="chip-icon">${pt.weather_icon}</div>
+            <div class="chip-temp">${pt.temperature}°C</div>
+            <div class="chip-precip">&#128167;${pt.precipitation_probability}%</div>`;
+        chip.title = [
+            `Stima: ${pt.estimated_time} (${fmtDate(pt.estimated_date)})`,
+            pt.weather_description,
+            `Temp: ${pt.temperature}°C (perc. ${pt.apparent_temperature}°C)`,
+            `Vento: ${pt.windspeed} km/h`,
+            `Pioggia: ${pt.precipitation_probability}%`,
+        ].join("\n");
+        row.appendChild(chip);
+    });
 }
 
 // ===== IMPORT GOOGLE MAPS =====
