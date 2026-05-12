@@ -14,10 +14,11 @@ const state = {
     trafficGroups: [],
     mapView: "none",
     mode: "driving",
-    curvePref: 3,
+    curvePref: 1,
     sampleInterval: 20,
     searchTimer: null,
     autoRecalcTimer: null,
+    dayDates: {},   // {dayIdx: {date, time}}
 };
 
 // ===== INIT =====
@@ -66,6 +67,8 @@ function bindControls() {
 function onCurvesChange(val) {
     state.curvePref = parseInt(val, 10);
     document.getElementById("curves-badge").textContent = `${val} / 5`;
+    // Propagate global value to all existing legs
+    state.legs.forEach((l) => { l.curves = state.curvePref; });
     scheduleRecalculate();
 }
 
@@ -73,10 +76,9 @@ function onCurvesChange(val) {
 function scheduleRecalculate() {
     clearTimeout(state.autoRecalcTimer);
     const savedLegData = state.legs.map((l) => ({
-        date: l.date,
-        time: l.time,
         weatherFetched: l.weatherFetched || false,
         trafficFetched: l.trafficFetched || false,
+        curves:         l.curves ?? state.curvePref,
     }));
     state.autoRecalcTimer = setTimeout(() => {
         const valid = state.waypoints.filter((w) => w.lat && w.lon);
@@ -125,18 +127,17 @@ function updateWp(id, patch) {
 }
 
 function renderWaypoints() {
-    const list = document.getElementById("waypoints-list");
+    const list  = document.getElementById("waypoints-list");
     list.innerHTML = "";
     const count = state.waypoints.length;
     const days  = computeWaypointDays();
 
     state.waypoints.forEach((wp, idx) => {
-        const isFirst = idx === 0;
-        const isLast  = idx === count - 1;
-        const dayIdx  = days[idx];
+        const isFirst  = idx === 0;
+        const isLast   = idx === count - 1;
+        const dayIdx   = days[idx];
         const dayColor = LEG_COLORS[dayIdx % LEG_COLORS.length];
 
-        // Day divider header
         if (isFirst || wp.startNewDay) {
             const hdr = document.createElement("div");
             hdr.className = "day-header";
@@ -152,9 +153,8 @@ function renderWaypoints() {
         const dotColor = isLast ? "#ea4335" : dayColor;
 
         const div = document.createElement("div");
-        div.className = "waypoint-item";
+        div.className  = "waypoint-item";
         div.dataset.wpid = wp.id;
-
         div.innerHTML = `
           <div class="waypoint-header">
             <div class="waypoint-badge${isLast && idx > 0 ? " is-last" : ""}">${idx + 1}</div>
@@ -289,7 +289,7 @@ function showSuggestions(results, id, inputEl) {
     box.classList.remove("hidden");
     results.slice(0, 6).forEach((r) => {
         const item = document.createElement("div");
-        item.className = "suggestion-item";
+        item.className   = "suggestion-item";
         item.textContent = r.display_name;
         item.addEventListener("click", () => { selectPlace(id, r); hideSuggestions(); });
         box.appendChild(item);
@@ -324,45 +324,48 @@ async function calculateRoute(savedLegData = null) {
     }
     showLoading(true);
     try {
+        // Build per-leg curves array: restore from savedLegData or default to curvePref
+        const curvesPerLeg = Array.from({ length: valid.length - 1 }, (_, i) =>
+            savedLegData?.[i]?.curves ?? state.curvePref
+        );
+
         const res = await fetch("/api/route", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                waypoints: valid.map((w) => ({ lat: w.lat, lon: w.lon })),
-                profile: state.mode,
-                curves: state.curvePref,
+                waypoints:      valid.map((w) => ({ lat: w.lat, lon: w.lon })),
+                profile:        state.mode,
+                curves:         state.curvePref,
+                curves_per_leg: state.mode === "motorcycle" ? curvesPerLeg : [],
             }),
         });
         const data = await res.json();
         if (data.error) { if (!savedLegData) alert("Errore percorso: " + data.error); return; }
 
         // Compute day index for each valid waypoint
-        const allDays  = computeWaypointDays();
-        const validIds = new Set(valid.map((w) => w.id));
+        const allDays   = computeWaypointDays();
         const validDays = state.waypoints
-            .filter((wp) => validIds.has(wp.id))
-            .map((_, i, arr) => {
-                let day = 0;
-                for (let j = 0; j <= i; j++) {
-                    if (j > 0 && arr[j].startNewDay) day++;
-                }
-                return day;
-            });
+            .filter((wp) => wp.lat && wp.lon)
+            .map((wp) => allDays[state.waypoints.indexOf(wp)]);
 
         state.legs = data.legs.map((leg, i) => {
-            const saved  = savedLegData?.[i];
             const dayIdx = validDays[i] ?? 0;
             return {
                 ...leg,
-                color: LEG_COLORS[dayIdx % LEG_COLORS.length],
-                day:   dayIdx,
-                fromName: valid[i]?.name   || `Tappa ${i + 1}`,
-                toName:   valid[i + 1]?.name || `Tappa ${i + 2}`,
-                date: saved?.date || "",
-                time: saved?.time || "09:00",
+                color:          LEG_COLORS[dayIdx % LEG_COLORS.length],
+                day:            dayIdx,
+                fromName:       valid[i]?.name     || `Tappa ${i + 1}`,
+                toName:         valid[i + 1]?.name || `Tappa ${i + 2}`,
+                curves:         curvesPerLeg[i] ?? state.curvePref,
                 weatherFetched: false,
                 trafficFetched: false,
             };
         });
+
+        // Ensure dayDates has an entry for every day in this route
+        const maxDay = Math.max(...state.legs.map((l) => l.day), 0);
+        for (let d = 0; d <= maxDay; d++) {
+            if (!state.dayDates[d]) state.dayDates[d] = { date: "", time: "09:00" };
+        }
 
         drawLegsOnMap();
         buildLegsPanel(data.total_distance_km, data.total_duration_formatted);
@@ -370,11 +373,12 @@ async function calculateRoute(savedLegData = null) {
         const allLL = state.legs.flatMap((l) => l.geometry.coordinates.map(([ln, lt]) => [lt, ln]));
         if (allLL.length) state.map.fitBounds(L.latLngBounds(allLL), { padding: [30, 30] });
 
-        // Re-fetch weather/traffic for legs that had data
+        // Re-fetch weather/traffic for legs that had data before recalc
         if (savedLegData) {
             for (let i = 0; i < state.legs.length; i++) {
-                const saved = savedLegData[i];
-                if (!saved || !state.legs[i].date) continue;
+                const saved   = savedLegData[i];
+                const dayDate = state.dayDates[state.legs[i].day];
+                if (!saved || !dayDate?.date) continue;
                 if (saved.weatherFetched) fetchWeatherSegment(i);
                 if (saved.trafficFetched)  fetchTrafficSegment(i);
             }
@@ -407,59 +411,73 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
     document.getElementById("legs-panel")?.remove();
 
     const panel = document.createElement("div");
-    panel.id = "legs-panel";
+    panel.id        = "legs-panel";
     panel.className = "panel";
 
     const motoNote = state.mode === "motorcycle"
-        ? `<div class="moto-info">&#127949; Moto &mdash; Preferenza curve: <strong>${state.curvePref}/5</strong></div>`
+        ? `<div class="moto-info">&#127949; Moto &mdash; curve impostabili per tratto</div>`
         : "";
 
     panel.innerHTML = `
       <div class="panel-title">Percorso calcolato</div>
       ${motoNote}
       <div id="summary-stats">
-        <div class="stat-box">
-          <div class="stat-label">Distanza totale</div>
-          <div class="stat-value">${totalDistKm} km</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-label">Tempo totale</div>
-          <div class="stat-value">${totalDurFmt}</div>
-        </div>
+        <div class="stat-box"><div class="stat-label">Distanza totale</div><div class="stat-value">${totalDistKm} km</div></div>
+        <div class="stat-box"><div class="stat-label">Tempo totale</div><div class="stat-value">${totalDurFmt}</div></div>
       </div>
       <button id="export-gmaps-btn" onclick="exportToGoogleMaps()">&#127758; Apri su Google Maps</button>
       <div id="legs-list"></div>
     `;
-
     document.getElementById("sidebar-body").appendChild(panel);
     const legsList = panel.querySelector("#legs-list");
 
     const maxDay = state.legs.reduce((m, l) => Math.max(m, l.day), 0);
 
     for (let d = 0; d <= maxDay; d++) {
-        const dayLegs = state.legs.filter((l) => l.day === d);
+        const dayLegs  = state.legs.filter((l) => l.day === d);
         if (!dayLegs.length) continue;
 
         const dayColor   = LEG_COLORS[d % LEG_COLORS.length];
         const dayTotalKm = dayLegs.reduce((s, l) => s + (parseFloat(l.distance_km) || 0), 0).toFixed(1);
+        const dd         = state.dayDates[d] || { date: "", time: "09:00" };
 
-        // Day header (only when there are multiple days)
-        if (maxDay > 0) {
-            const sep = document.createElement("div");
-            sep.className = "legs-day-header";
-            sep.style.borderLeftColor = dayColor;
-            sep.innerHTML = `
-              <span class="legs-day-dot" style="background:${dayColor}"></span>
-              <span class="legs-day-title" style="color:${dayColor}">Giorno ${d + 1}</span>
-              <span class="legs-day-km">${dayTotalKm} km</span>
-            `;
-            legsList.appendChild(sep);
-        }
+        // Day header with date/time
+        const sep = document.createElement("div");
+        sep.className = "legs-day-header";
+        sep.style.borderLeftColor = dayColor;
+        sep.innerHTML = `
+          <div class="legs-day-info">
+            <span class="legs-day-dot" style="background:${dayColor}"></span>
+            <span class="legs-day-title" style="color:${dayColor}">Giorno ${d + 1}</span>
+            <span class="legs-day-km">${dayTotalKm} km</span>
+          </div>
+          <div class="legs-day-datetime">
+            <input class="wp-date-input" type="date"
+              value="${dd.date}" min="${todayStr()}" max="${maxDateStr()}"
+              onchange="updateDayDate(${d}, 'date', this.value)" />
+            <input class="wp-time-input" type="time"
+              value="${dd.time || "09:00"}"
+              onchange="updateDayDate(${d}, 'time', this.value)" />
+          </div>
+        `;
+        legsList.appendChild(sep);
 
         dayLegs.forEach((leg) => {
             const idx  = state.legs.indexOf(leg);
             const from = leg.fromName.split(",")[0];
             const to   = leg.toName.split(",")[0];
+
+            const curvesHtml = state.mode === "motorcycle" ? `
+              <div class="leg-curves-control">
+                <div class="leg-curves-row">
+                  <span class="leg-curves-label">&#127949; Curve</span>
+                  <span class="leg-curves-badge" id="leg-curve-badge-${idx}">${leg.curves}/5</span>
+                </div>
+                <input class="leg-curves-slider" type="range" min="1" max="5"
+                  value="${leg.curves}" step="1"
+                  oninput="updateLegCurves(${idx}, +this.value)" />
+                <div class="leg-curves-hints"><span>1 Diretto</span><span>5 Panoramico</span></div>
+              </div>` : "";
 
             const card = document.createElement("div");
             card.className = "leg-card";
@@ -477,14 +495,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
                 <span class="curve-label">${escHtml(leg.curvature_label || "—")}</span>
                 <span class="curve-score">${leg.curvature_score || 0} °/km</span>
               </div>
-              <div class="leg-datetime-label">Data e ora di partenza del tratto:</div>
-              <div class="leg-card-controls">
-                <input class="wp-date-input" type="date" value="${leg.date}"
-                  min="${todayStr()}" max="${maxDateStr()}"
-                  onchange="updateLeg(${idx}, 'date', this.value)" />
-                <input class="wp-time-input" type="time" value="${leg.time}"
-                  onchange="updateLeg(${idx}, 'time', this.value)" />
-              </div>
+              ${curvesHtml}
               <div class="leg-card-btns">
                 <button class="btn-weather-seg" onclick="fetchWeatherSegment(${idx})">&#127780; Meteo</button>
                 <button class="btn-traffic-seg" onclick="fetchTrafficSegment(${idx})">&#128678; Traffico</button>
@@ -497,17 +508,28 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
     }
 }
 
-function updateLeg(idx, key, value) {
-    if (state.legs[idx]) state.legs[idx][key] = value;
+// ===== UPDATE HELPERS =====
+function updateDayDate(dayIdx, key, val) {
+    if (!state.dayDates[dayIdx]) state.dayDates[dayIdx] = { date: "", time: "09:00" };
+    state.dayDates[dayIdx][key] = val;
+}
+
+function updateLegCurves(legIdx, val) {
+    if (!state.legs[legIdx]) return;
+    state.legs[legIdx].curves = val;
+    const badge = document.getElementById(`leg-curve-badge-${legIdx}`);
+    if (badge) badge.textContent = `${val}/5`;
+    scheduleRecalculate();
 }
 
 // ===== METEO PER TRATTO =====
 async function fetchWeatherSegment(legIdx) {
-    const leg = state.legs[legIdx];
+    const leg     = state.legs[legIdx];
     if (!leg) return;
+    const dayDate = state.dayDates[leg.day];
 
-    if (!leg.date) {
-        alert(`Seleziona una data di partenza per il Tratto ${legIdx + 1} prima di richiedere le previsioni.`);
+    if (!dayDate?.date) {
+        alert(`Seleziona una data per il Giorno ${leg.day + 1} prima di richiedere le previsioni.`);
         return;
     }
 
@@ -521,8 +543,8 @@ async function fetchWeatherSegment(legIdx) {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 geometry:     leg.geometry,
-                date:         leg.date,
-                time:         leg.time || "09:00",
+                date:         dayDate.date,
+                time:         dayDate.time || "09:00",
                 duration_sec: leg.duration_sec,
                 distance_km:  leg.distance_km,
                 interval_km:  state.sampleInterval,
@@ -535,7 +557,7 @@ async function fetchWeatherSegment(legIdx) {
             return;
         }
 
-        renderSegmentWeather(legIdx, results, leg.time || "09:00", leg.date, leg.color);
+        renderSegmentWeather(legIdx, results, dayDate.time || "09:00", dayDate.date, leg.color);
         renderWeatherMarkersOnMap(legIdx, results, leg.color);
         setMapView("weather");
         showMapToggle();
@@ -580,7 +602,7 @@ function renderSegmentWeather(legIdx, results, departureTime, dateStr, legColor)
           <div class="chip-wind">&#128168;${pt.windspeed}</div>
         `;
         chip.title = [
-            `Stima passaggio: ${pt.estimated_time} (${fmtDate(pt.estimated_date)})`,
+            `Stima: ${pt.estimated_time} (${fmtDate(pt.estimated_date)})`,
             pt.weather_description,
             `Temp: ${pt.temperature}°C (perc. ${pt.apparent_temperature}°C)`,
             `Vento: ${pt.windspeed} km/h ${compassDir(pt.winddirection)}`,
@@ -647,11 +669,12 @@ function showMapToggle() {
 
 // ===== TRAFFICO PER TRATTO =====
 async function fetchTrafficSegment(legIdx) {
-    const leg = state.legs[legIdx];
+    const leg     = state.legs[legIdx];
     if (!leg) return;
+    const dayDate = state.dayDates[leg.day];
 
-    if (!leg.date) {
-        alert(`Seleziona una data di partenza per il Tratto ${legIdx + 1} prima di richiedere il traffico.`);
+    if (!dayDate?.date) {
+        alert(`Seleziona una data per il Giorno ${leg.day + 1} prima di richiedere il traffico.`);
         return;
     }
 
@@ -665,8 +688,8 @@ async function fetchTrafficSegment(legIdx) {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 geometry:     leg.geometry,
-                date:         leg.date,
-                time:         leg.time || "09:00",
+                date:         dayDate.date,
+                time:         dayDate.time || "09:00",
                 duration_sec: leg.duration_sec,
                 distance_km:  leg.distance_km,
                 profile:      state.mode,
@@ -682,7 +705,7 @@ async function fetchTrafficSegment(legIdx) {
 
         const results = data.points || data;
         const meta    = data.points ? data : null;
-        renderSegmentTraffic(legIdx, results, leg.time || "09:00", leg.date, leg.color, meta);
+        renderSegmentTraffic(legIdx, results, dayDate.time || "09:00", dayDate.date, leg.color, meta);
         renderTrafficMarkersOnMap(legIdx, results);
         setMapView("traffic");
         showMapToggle();
@@ -707,7 +730,7 @@ function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor,
 
     container.innerHTML = `
       <div class="seg-weather-header" style="border-left-color:${legColor}">
-        &#128678; Traffico &mdash; ${fmtDate(dateStr)} ore ${departureTime} &mdash;
+        &#128678; ${fmtDate(dateStr)} ore ${departureTime} &mdash;
         ${results.length} punti ogni ~${state.sampleInterval} km${delayNote} ${sourceBadge}
       </div>
       <div class="seg-weather-row" id="seg-traffic-chips-${legIdx}"></div>
@@ -723,17 +746,12 @@ function renderSegmentTraffic(legIdx, results, departureTime, dateStr, legColor,
           <div class="chip-time">&#128336;${pt.estimated_time}</div>
           <div class="chip-traffic-icon">${pt.traffic_icon}</div>
           <div class="chip-traffic-label">${escHtml(pt.traffic_label)}</div>
-          ${pt.delay_percent > 0
-              ? `<div class="chip-delay">+${pt.delay_percent}%</div>`
-              : `<div class="chip-delay">&#10003;</div>`}
+          ${pt.delay_percent > 0 ? `<div class="chip-delay">+${pt.delay_percent}%</div>` : `<div class="chip-delay">&#10003;</div>`}
         `;
-        const tooltipLines = [`${pt.weekday_name} ${pt.estimated_time} — km ${pt.dist_km}`, `Traffico: ${pt.traffic_label}`];
-        if (pt.source === "tomtom") {
-            tooltipLines.push(`Velocità: ${pt.current_speed} km/h (libera: ${pt.free_flow_speed} km/h)`);
-            tooltipLines.push(`Flusso: ${Math.round(pt.flow_ratio * 100)}%`);
-        }
-        if (pt.delay_percent > 0) tooltipLines.push(`Ritardo: +${pt.delay_percent}%`);
-        chip.title = tooltipLines.join("\n");
+        const tt = [`${pt.weekday_name} ${pt.estimated_time} — km ${pt.dist_km}`, `Traffico: ${pt.traffic_label}`];
+        if (pt.source === "tomtom") tt.push(`Velocità: ${pt.current_speed} km/h (libera: ${pt.free_flow_speed} km/h)`);
+        if (pt.delay_percent > 0) tt.push(`Ritardo: +${pt.delay_percent}%`);
+        chip.title = tt.join("\n");
         row.appendChild(chip);
     });
 }
@@ -756,8 +774,7 @@ function renderTrafficMarkersOnMap(legIdx, results) {
     results.forEach((pt) => {
         const marker = L.marker([pt.lat, pt.lon], { icon: makeTrafficIcon(pt) });
         const speedInfo = pt.source === "tomtom"
-            ? `<div style="color:#555;margin-top:3px;font-size:11px">&#128225; ${pt.current_speed} km/h su ${pt.free_flow_speed} km/h</div>`
-            : "";
+            ? `<div style="color:#555;margin-top:3px;font-size:11px">&#128225; ${pt.current_speed} km/h su ${pt.free_flow_speed} km/h</div>` : "";
         marker.bindPopup(`
           <div style="min-width:155px;font-size:13px">
             <div style="font-size:11px;color:#888;margin-bottom:4px">&#8987; ${pt.weekday_name} ${pt.estimated_time} &mdash; km ${pt.dist_km}</div>
@@ -789,8 +806,9 @@ function clearLegs() {
     state.legLayers = [];
     clearAllWeatherMarkers();
     clearAllTrafficMarkers();
-    state.mapView = "none";
-    state.legs = [];
+    state.mapView  = "none";
+    state.legs     = [];
+    state.dayDates = {};
     document.getElementById("legs-panel")?.remove();
     document.getElementById("map-layer-toggle")?.classList.add("hidden");
 }

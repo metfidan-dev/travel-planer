@@ -96,17 +96,21 @@ def reverse_geocode():
 
 @app.route("/api/route", methods=["POST"])
 def calculate_route():
-    data = request.get_json() or {}
-    waypoints = data.get("waypoints", [])
-    profile = data.get("profile", "driving")
-    curves = int(data.get("curves", 3))
+    data           = request.get_json() or {}
+    waypoints      = data.get("waypoints", [])
+    profile        = data.get("profile", "driving")
+    curves         = int(data.get("curves", 1))
+    curves_per_leg = data.get("curves_per_leg", [])   # list of int, one per leg
 
     if len(waypoints) < 2:
         return jsonify({"error": "Servono almeno 2 tappe"}), 400
 
     try:
         if profile == "motorcycle":
-            result = _call_valhalla(waypoints, curves)
+            if curves_per_leg and len(curves_per_leg) == len(waypoints) - 1:
+                result = _call_valhalla_per_leg(waypoints, curves_per_leg)
+            else:
+                result = _call_valhalla(waypoints, curves)
         else:
             result = _call_osrm(waypoints, profile)
         return jsonify(result)
@@ -316,6 +320,24 @@ def _call_osrm(waypoints, profile):
         "legs": legs,
         "total_distance_km": round(route["distance"] / 1000, 1),
         "total_duration_formatted": _fmt_duration(route["duration"]),
+    }
+
+
+def _call_valhalla_per_leg(waypoints, curves_per_leg):
+    """Routing moto tratto per tratto con preferenza curve diversa per ognuno."""
+    all_legs   = []
+    total_dist = 0.0
+    total_dur  = 0.0
+    for i in range(len(waypoints) - 1):
+        res = _call_valhalla([waypoints[i], waypoints[i + 1]], int(curves_per_leg[i]))
+        leg = res["legs"][0]
+        all_legs.append(leg)
+        total_dist += leg["distance_km"]
+        total_dur  += leg["duration_sec"]
+    return {
+        "legs": all_legs,
+        "total_distance_km": round(total_dist, 1),
+        "total_duration_formatted": _fmt_duration(total_dur),
     }
 
 
