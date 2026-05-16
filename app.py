@@ -16,6 +16,8 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1"
 TOMTOM_ROUTING = "https://api.tomtom.com/routing/1/calculateRoute"
 TOMTOM_MODES   = {"driving": "car", "motorcycle": "motorcycle", "cycling": "bicycle", "walking": "pedestrian"}
 OCM_URL        = "https://api.openchargemap.io/v3/poi/"
+OCM_API_KEY    = os.environ.get("OCM_API_KEY", "")
+OVERPASS_URL   = "https://overpass-api.de/api/interpreter"
 HEADERS        = {"User-Agent": "TravelPlannerApp/1.0 (educational project)"}
 
 # ===== EV VEHICLE DATABASE =====
@@ -706,24 +708,26 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
         return result
 
     def resolve_stop(cands):
-        # Attempt 1: all candidate points in parallel, 20 km, preferred filters
-        with ThreadPoolExecutor(max_workers=len(cands)) as inner:
-            ocm_results = list(inner.map(
-                lambda loc: (_find_ocm_station(loc[0], loc[1], connector_ids, min_kw, radius_km=20), loc),
-                cands
-            ))
-        for station, loc in ocm_results:
+        # Tier 1: sequential OCM queries per candidate, 20 km, preferred filters
+        # Sequential to avoid rate-limiting (OCM blocks simultaneous requests without key)
+        for loc in cands:
+            station = _find_ocm_station(loc[0], loc[1], connector_ids, min_kw, radius_km=20)
             if station:
                 return _build_result(station, loc)
 
-        # Attempt 2: nearest station anywhere (no radius limit), same connector/power filters
+        # Tier 2: last candidate, 300 km radius, same connector/power filters
         last    = cands[-1]
         station = _find_ocm_station(last[0], last[1], connector_ids, min_kw, radius_km=300)
         if station:
             return _build_result(station, last, fallback=True)
 
-        # Attempt 3: nearest station anywhere, no filters at all
+        # Tier 3: last candidate, 300 km radius, no filters
         station = _find_ocm_station(last[0], last[1], [], 0, radius_km=300)
+        if station:
+            return _build_result(station, last, fallback=True, fallback_nofilter=True)
+
+        # Tier 4: Overpass/OSM fallback (free, no API key, 50 km radius)
+        station = _find_overpass_station(last[0], last[1], radius_m=50000)
         if station:
             return _build_result(station, last, fallback=True, fallback_nofilter=True)
 
@@ -762,12 +766,14 @@ def _find_ocm_station(lat, lon, connector_ids, min_kw, radius_km=20):
         "compact":      "true",
         "verbose":      "false",
     }
+    if OCM_API_KEY:
+        params["key"] = OCM_API_KEY
     if connector_ids:
         params["connectiontypeid"] = ",".join(str(c) for c in connector_ids)
     if min_kw and min_kw > 0:
         params["minpowerkw"] = min_kw
     try:
-        resp = requests.get(OCM_URL, params=params, headers=HEADERS, timeout=10)
+        resp = requests.get(OCM_URL, params=params, headers=HEADERS, timeout=15)
         data = resp.json()
     except Exception:
         return None
@@ -790,6 +796,71 @@ def _find_ocm_station(lat, lon, connector_ids, min_kw, radius_km=20):
         "max_kw":     round(float(max_kw), 1),
         "connectors": conn_names[:3],
         "ocm_id":     best.get("ID"),
+    }
+
+
+def _find_overpass_station(lat, lon, radius_m=50000):
+    """Query OSM via Overpass for the nearest EV charging station — no API key needed."""
+    query = (
+        f"[out:json][timeout:25];"
+        f"("
+        f'node["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
+        f'way["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
+        f");"
+        f"out center 5;"
+    )
+    try:
+        resp = requests.post(
+            OVERPASS_URL,
+            data={"data": query},
+            headers=HEADERS,
+            timeout=30,
+        )
+        data = resp.json()
+    except Exception:
+        return None
+
+    elements = data.get("elements", [])
+    if not elements:
+        return None
+
+    best = elements[0]
+    if best.get("type") == "way":
+        elt_lat = best.get("center", {}).get("lat", lat)
+        elt_lon = best.get("center", {}).get("lon", lon)
+    else:
+        elt_lat = best.get("lat", lat)
+        elt_lon = best.get("lon", lon)
+
+    tags    = best.get("tags", {})
+    name    = tags.get("name") or tags.get("operator") or "Stazione di ricarica (OSM)"
+    address = ", ".join(p for p in [tags.get("addr:street", ""), tags.get("addr:city", "")] if p)
+
+    max_kw = 0.0
+    for key in ("maxpower", "socket:type2_combo:output", "socket:chademo:output", "socket:type2:output"):
+        raw = tags.get(key, "")
+        if raw:
+            try:
+                val = float(re.sub(r"[^\d.]", "", raw))
+                if "W" in raw and "kW" not in raw:
+                    val /= 1000
+                max_kw = max(max_kw, val)
+            except (ValueError, TypeError):
+                pass
+
+    connectors = []
+    for sock_key, label in [("socket:type2_combo", "CCS"), ("socket:chademo", "CHAdeMO"), ("socket:type2", "Type 2")]:
+        if tags.get(sock_key):
+            connectors.append(label)
+
+    return {
+        "lat":        elt_lat,
+        "lon":        elt_lon,
+        "name":       name,
+        "address":    address or "Indirizzo non disponibile",
+        "max_kw":     round(max_kw, 1),
+        "connectors": connectors or ["Tipo non specificato"],
+        "ocm_id":     None,
     }
 
 
