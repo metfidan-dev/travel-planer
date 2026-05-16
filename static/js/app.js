@@ -1108,7 +1108,10 @@ function renderEvStops(dayIdx, stops) {
         group.id = `ev-stop-d${dayIdx}-s${stopIdx}`;
 
         const battArrow = `${stop.battery_arrival_pct}%→${stop.battery_after_pct}%`;
-        group.innerHTML = `<div class="ev-stop-group-header">&#9889; Sosta al km ${stop.route_km} &mdash; &#128267; ${battArrow}</div>`;
+        const extBadge  = stop.extended_search
+            ? ' <span class="ev-fallback-badge" title="Nessuna stazione trovata nel punto ottimale: trovata anticipando/posticipando la sosta">ricerca estesa</span>'
+            : "";
+        group.innerHTML = `<div class="ev-stop-group-header">&#9889; Sosta al km ${stop.route_km} &mdash; &#128267; ${battArrow}${extBadge}</div>`;
 
         const candsEl = document.createElement("div");
         candsEl.className = "ev-candidates";

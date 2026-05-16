@@ -665,15 +665,19 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
     full_range_km = battery_kwh / consumption_km
     window_km     = max(interval_km * 3, full_range_km * 0.15)
 
-    # Phase 1 – walk geometry, collecting:
-    #   - sample points every interval_km (for battery estimation + bounding box)
-    #   - raw route coords in each window (for accurate distance-to-road measurement)
-    stops_cands      = []
-    stops_window_pts = []   # dense route points (lat, lon) in each stop's window
-    candidates       = []
-    window_pts       = []   # raw (lat, lon, cumulative_km) for current window
-    cumulative       = 0.0
-    next_sample      = float(interval_km)
+    # Phase 1 – walk geometry, collecting per-stop:
+    #   · primary window: last window_km before alert (optimal zone)
+    #   · full safe zone: from last charge point to alert (anticipate/posticipate fallback)
+    #   · raw route coords (dense OSRM geometry) for accurate distance-to-road
+    stops_cands      = []   # primary window sample points
+    stops_window_pts = []   # primary window raw route coords
+    stops_zone_cands = []   # full safe zone sample points (for expanded search)
+    stops_zone_pts   = []   # full safe zone raw route coords
+
+    candidates  = []   # sample points since last charge
+    zone_pts    = []   # route coords since last charge (lat, lon, km)
+    cumulative  = 0.0
+    next_sample = float(interval_km)
 
     for i in range(1, len(coords)):
         p0  = coords[i - 1]
@@ -686,10 +690,8 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         cumulative  += seg
         current_kwh -= seg * consumption_km
 
-        # Collect every raw route coord for accurate distance-to-road measurement
-        window_pts.append((p1[1], p1[0], cumulative))
+        zone_pts.append((p1[1], p1[0], cumulative))
 
-        # Interpolate sample points (for battery estimation)
         while next_sample <= cumulative:
             frac  = (next_sample - prev_cum) / seg
             s_lon = p0[0] + frac * (p1[0] - p0[0])
@@ -699,17 +701,35 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             next_sample += interval_km
 
         if current_kwh <= alert_kwh:
-            window_start = cumulative - window_km
-            window_cands = [c for c in candidates if c[3] >= window_start]
-            raw_pts = [(w[0], w[1]) for w in window_pts if w[2] >= window_start]
-            if not window_cands:
-                window_cands = [(p1[1], p1[0], max(current_kwh, 0.0), round(cumulative, 1))]
-            if not raw_pts:
-                raw_pts = [(p1[1], p1[0])]
-            stops_cands.append(window_cands[-10:])
-            stops_window_pts.append(raw_pts)
+            # Primary window: last window_km before alert
+            window_start  = cumulative - window_km
+            w_cands = [c for c in candidates if c[3] >= window_start]
+            w_pts   = [(z[0], z[1]) for z in zone_pts if z[2] >= window_start]
+
+            # Full safe zone: everything since last charge
+            z_cands = list(candidates)
+            z_pts   = [(z[0], z[1]) for z in zone_pts]
+            # Subsample if very long route to keep computation fast
+            if len(z_pts) > 600:
+                step  = len(z_pts) // 600 + 1
+                z_pts = z_pts[::step]
+
+            if not w_cands:
+                w_cands = [(p1[1], p1[0], max(current_kwh, 0.0), round(cumulative, 1))]
+            if not w_pts:
+                w_pts = z_pts or [(p1[1], p1[0])]
+            if not z_cands:
+                z_cands = w_cands
+            if not z_pts:
+                z_pts = [(p1[1], p1[0])]
+
+            stops_cands.append(w_cands[-10:])
+            stops_window_pts.append(w_pts)
+            stops_zone_cands.append(z_cands)
+            stops_zone_pts.append(z_pts)
+
             candidates  = []
-            window_pts  = []
+            zone_pts    = []
             next_sample = cumulative + interval_km
             current_kwh = max_kwh
 
@@ -785,56 +805,74 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         results.sort(key=lambda c: (c["detour_km"], c["route_km"]))
         return results
 
-    def resolve_stop(cands, window_pts):
-        lats = [c[0] for c in cands]
-        lons = [c[1] for c in cands]
+    def _ocm_scored(bbox, conn_ids, pw, cands, pts, fallback=False, nf=False):
+        """Query OCM with bbox and score results. Returns sorted list."""
+        sts = _find_ocm_bbox(bbox, conn_ids, pw)
+        return _score_stations(sts, cands, pts, fallback=fallback, fallback_nofilter=nf)
+
+    def _make_bbox(cands_or_pts, buf_deg):
+        lats = [c[0] for c in cands_or_pts]
+        lons = [c[1] for c in cands_or_pts]
+        return (min(lats) - buf_deg, min(lons) - buf_deg,
+                max(lats) + buf_deg, max(lons) + buf_deg)
+
+    def resolve_stop(cands, window_pts, zone_cands, zone_pts):
         buf  = corridor_km / 111.0
-        bbox = (min(lats) - buf, min(lons) - buf,
-                max(lats) + buf, max(lons) + buf)
+        w_bbox = _make_bbox(cands, buf)
+        z_bbox = _make_bbox(zone_cands, buf)
 
-        # Tier 1: bbox query with preferred connector/power filters
-        stations = _find_ocm_bbox(bbox, connector_ids, min_kw)
-        scored   = _score_stations(stations, cands, window_pts)
-
-        # Tier 2 (no extra call): same OCM results, relax reachability — mark fallback
+        # ── Primary search: optimal window (last window_km before alert) ──────
+        # Tier 1: with connector/power filters
+        scored = _ocm_scored(w_bbox, connector_ids, min_kw, cands, window_pts)
+        # Tier 2: same stations, no reachability restriction (fallback badge)
         if not scored:
-            scored = _score_stations(stations, cands, window_pts, fallback=True)
-
-        # Tier 3: bbox query without any connector/power filters
+            scored = _ocm_scored(w_bbox, connector_ids, min_kw,
+                                 cands, window_pts, fallback=True)
+        # Tier 3: no connector/power filters
         if not scored:
-            stations_nf = _find_ocm_bbox(bbox, [], 0)
-            scored = _score_stations(stations_nf, cands, window_pts,
-                                     fallback=True, fallback_nofilter=True)
+            scored = _ocm_scored(w_bbox, [], 0, cands, window_pts,
+                                 fallback=True, nf=True)
 
-        # Tier 4: Overpass/OSM — free, no API key needed
+        if scored:
+            top3 = scored[:3]
+            return {**top3[0], "candidates": top3}
+
+        # ── Extended search: full safe zone (anticipate or posticipate) ───────
+        # Tier 4: full zone, with filters
+        scored = _ocm_scored(z_bbox, connector_ids, min_kw,
+                             zone_cands, zone_pts, fallback=True)
+        # Tier 5: full zone, no filters
         if not scored:
-            last = cands[-1]
-            st   = _find_overpass_station(last[0], last[1],
-                                          radius_m=int(corridor_km * 2000))
+            scored = _ocm_scored(z_bbox, [], 0, zone_cands, zone_pts,
+                                 fallback=True, nf=True)
+
+        if scored:
+            top3 = scored[:3]
+            return {**top3[0], "candidates": top3, "extended_search": True}
+
+        # ── Last resort: Overpass/OSM + single-point OCM ──────────────────────
+        last = zone_cands[-1]
+        for st in [
+            _find_overpass_station(last[0], last[1], radius_m=50000),
+            _find_ocm_station(last[0], last[1], [], 0, radius_km=50),
+        ]:
             if st:
-                scored = _score_stations([st], cands, window_pts,
+                scored = _score_stations([st], zone_cands, zone_pts,
                                          fallback=True, fallback_nofilter=True)
+                if scored:
+                    top3 = scored[:3]
+                    return {**top3[0], "candidates": top3, "extended_search": True}
 
-        # Tier 5 (last resort): single-point OCM query, no filters, 50 km radius
-        if not scored:
-            last = cands[-1]
-            st   = _find_ocm_station(last[0], last[1], [], 0, radius_km=50)
-            if st:
-                scored = _score_stations([st], cands, window_pts,
-                                         fallback=True, fallback_nofilter=True)
-
-        if not scored:
-            lat, lon, arr_kwh, km = cands[-1]
-            return {"error": True, "lat": lat, "lon": lon,
-                    "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
-                    "route_km": km, "message": "Nessuna stazione di ricarica trovata"}
-
-        top3 = scored[:3]
-        return {**top3[0], "candidates": top3}
+        lat, lon, arr_kwh, km = zone_cands[-1]
+        return {"error": True, "lat": lat, "lon": lon,
+                "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
+                "route_km": km, "message": "Nessuna stazione di ricarica trovata"}
 
     with ThreadPoolExecutor(max_workers=min(len(stops_cands), 5)) as ex:
-        return list(ex.map(lambda p: resolve_stop(*p),
-                           zip(stops_cands, stops_window_pts)))
+        return list(ex.map(
+            lambda p: resolve_stop(*p),
+            zip(stops_cands, stops_window_pts, stops_zone_cands, stops_zone_pts),
+        ))
 
 
 def _calc_charge_time(current_kwh, target_kwh, battery_kwh, charger_kw):
