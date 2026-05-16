@@ -1057,6 +1057,7 @@ async function fetchEvChargingStops(dayIdx) {
                 battery:       getEvBattery(),
                 connector_ids: [parseInt(document.getElementById("ev-connector").value, 10)],
                 min_kw:        parseInt(document.getElementById("ev-min-kw").value, 10),
+                interval_km:   state.sampleInterval,
             }),
         });
         const stops = await res.json();

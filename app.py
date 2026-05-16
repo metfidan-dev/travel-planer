@@ -638,17 +638,18 @@ def ev_charging_stops():
     battery       = data.get("battery", {})
     connector_ids = data.get("connector_ids", [33])
     min_kw        = int(data.get("min_kw", 50))
+    interval_km   = max(5, min(50, int(data.get("interval_km", 20))))
 
     if not geometry or not ev or not battery:
         return jsonify({"error": "Parametri mancanti"}), 400
     try:
-        stops = _find_ev_stops(geometry, ev, battery, connector_ids, min_kw)
+        stops = _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km)
         return jsonify(stops)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
 
-def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
+def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20):
     coords         = geometry.get("coordinates", [])
     consumption_km = ev["consumption"] / 100
     battery_kwh    = float(ev["battery_kwh"])
@@ -658,76 +659,95 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
     max_kwh        = battery["max_pct"]   / 100 * battery_kwh
     alert_kwh      = min_kwh + battery_kwh * 0.15
 
-    # Phase 1 – pure math, no network: find WHERE charging is needed
-    # Search window: start sampling candidates 20% of total range before depletion
-    window_km        = max(20.0, 0.20 * battery_kwh / consumption_km)
-    search_start_kwh = alert_kwh + window_km * consumption_km
+    # Corridor width: half the sampling interval, capped between 3 and 10 km
+    corridor_km  = min(max(interval_km / 2.0, 3.0), 10.0)
+    # Search window before alert: 3 sample intervals or 15% of full range
+    full_range_km = battery_kwh / consumption_km
+    window_km     = max(interval_km * 3, full_range_km * 0.15)
 
-    # Phase 1 – pure math: collect candidate search points for each needed stop
-    stops_cands  = []   # list of lists
-    candidates   = []
-    last_cand_km = -999.0
-    cumulative   = 0.0
+    # Phase 1 – walk geometry, interpolate sample points every interval_km
+    # (same approach as weather/traffic sampling)
+    stops_cands = []
+    candidates  = []
+    cumulative  = 0.0
+    next_sample = float(interval_km)
 
     for i in range(1, len(coords)):
-        seg          = _haversine(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1])
+        p0  = coords[i - 1]
+        p1  = coords[i]
+        seg = _haversine(p0[0], p0[1], p1[0], p1[1])
+        if seg == 0:
+            continue
+        prev_cum = cumulative
+        prev_kwh = current_kwh
         cumulative  += seg
         current_kwh -= seg * consumption_km
 
-        # Within the search window: sample a candidate every ~20 km
-        if current_kwh <= search_start_kwh and cumulative - last_cand_km >= 20.0:
-            candidates.append((coords[i][1], coords[i][0], max(current_kwh, 0.0), round(cumulative, 1)))
-            last_cand_km = cumulative
+        # Interpolate sample points within this segment
+        while next_sample <= cumulative:
+            frac  = (next_sample - prev_cum) / seg
+            s_lon = p0[0] + frac * (p1[0] - p0[0])
+            s_lat = p0[1] + frac * (p1[1] - p0[1])
+            s_kwh = max(prev_kwh - frac * seg * consumption_km, 0.0)
+            candidates.append((s_lat, s_lon, s_kwh, round(next_sample, 1)))
+            next_sample += interval_km
 
         if current_kwh <= alert_kwh:
-            if not candidates:   # degenerate case: very steep consumption
-                candidates.append((coords[i][1], coords[i][0], max(current_kwh, 0.0), round(cumulative, 1)))
-            stops_cands.append(candidates)
-            candidates   = []
-            last_cand_km = cumulative
-            current_kwh  = max_kwh   # simulate charging, continue
+            # Keep only candidates in the window before this alert point
+            window_start = cumulative - window_km
+            window_cands = [c for c in candidates if c[3] >= window_start]
+            if not window_cands:
+                window_cands = [(p1[1], p1[0], max(current_kwh, 0.0), round(cumulative, 1))]
+            # Cap to 10 candidates to bound API calls
+            stops_cands.append(window_cands[-10:])
+            candidates  = []
+            next_sample = cumulative + interval_km
+            current_kwh = max_kwh
 
     if not stops_cands:
         return []
 
-    # Phase 2 – resolve each stop: parallel OCM queries across candidates, then unlimited fallbacks
+    # Phase 2 – resolve each stop via corridor search along the route
     def _build_result(station, loc, fallback=False, fallback_nofilter=False):
         lat, lon, arr_kwh, km = loc
-        kw       = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
-        slat     = station.get("lat") or lat
-        slon     = station.get("lon") or lon
-        detour   = round(_haversine(lon, lat, slon, slat), 1)
-        result   = {**station,
-                    "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
-                    "battery_after_pct":   round(max_kwh  / battery_kwh * 100, 1),
-                    "charge_time_min":     _calc_charge_time(arr_kwh, max_kwh, battery_kwh, kw),
-                    "route_km":            km,
-                    "detour_km":           detour}
+        kw     = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
+        slat   = station.get("lat") or lat
+        slon   = station.get("lon") or lon
+        detour = round(_haversine(lon, lat, slon, slat), 1)
+        result = {**station,
+                  "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
+                  "battery_after_pct":   round(max_kwh  / battery_kwh * 100, 1),
+                  "charge_time_min":     _calc_charge_time(arr_kwh, max_kwh, battery_kwh, kw),
+                  "route_km":            km,
+                  "detour_km":           detour}
         if fallback:          result["fallback"]          = True
         if fallback_nofilter: result["fallback_nofilter"] = True
         return result
 
     def resolve_stop(cands):
-        # Tier 1: sequential OCM queries per candidate, 20 km, preferred filters
-        # Sequential to avoid rate-limiting (OCM blocks simultaneous requests without key)
+        # Tier 1: corridor search along route — sample points at corridor_km radius
         for loc in cands:
-            station = _find_ocm_station(loc[0], loc[1], connector_ids, min_kw, radius_km=20)
+            station = _find_ocm_station(loc[0], loc[1], connector_ids, min_kw,
+                                        radius_km=corridor_km)
             if station:
                 return _build_result(station, loc)
 
-        # Tier 2: last candidate, 50 km radius, same connector/power filters
+        # Tier 2: last candidate, wider corridor (2×), same filters
         last    = cands[-1]
-        station = _find_ocm_station(last[0], last[1], connector_ids, min_kw, radius_km=50)
+        station = _find_ocm_station(last[0], last[1], connector_ids, min_kw,
+                                    radius_km=corridor_km * 2)
         if station:
             return _build_result(station, last, fallback=True)
 
-        # Tier 3: last candidate, 50 km radius, no filters
-        station = _find_ocm_station(last[0], last[1], [], 0, radius_km=50)
+        # Tier 3: last candidate, wider corridor, no filters
+        station = _find_ocm_station(last[0], last[1], [], 0,
+                                    radius_km=corridor_km * 2)
         if station:
             return _build_result(station, last, fallback=True, fallback_nofilter=True)
 
-        # Tier 4: Overpass/OSM fallback (free, no API key, 50 km radius)
-        station = _find_overpass_station(last[0], last[1], radius_m=50000)
+        # Tier 4: Overpass/OSM, last candidate, wider corridor
+        station = _find_overpass_station(last[0], last[1],
+                                         radius_m=int(corridor_km * 2000))
         if station:
             return _build_result(station, last, fallback=True, fallback_nofilter=True)
 
