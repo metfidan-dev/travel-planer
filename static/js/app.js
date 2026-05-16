@@ -14,7 +14,8 @@ const state = {
     trafficGroups: {},   // keyed by "day-N"
     compareWeather: {},  // keyed by "day-N"
     evVehicles: [],
-    evMarkers: [],
+    evMarkers: {},       // keyed by "d{day}s{stop}"
+    evStopData: {},      // keyed by "d{day}", value: [{candidates, selectedIdx}]
     evMarkersVisible: true,
     mapView: "none",
     mode: "driving",
@@ -945,6 +946,7 @@ function clearLegs() {
     clearAllTrafficMarkers();
     clearEvMarkers();
     state.evMarkersVisible = true;
+    state.evStopData     = {};
     state.mapView        = "none";
     state.legs           = [];
     state.dayDates       = {};
@@ -1078,71 +1080,114 @@ function renderEvStops(dayIdx, stops) {
         return;
     }
 
+    // Store stop data in state for later candidate switching
+    state.evStopData[`d${dayIdx}`] = stops.map(s => ({
+        candidates: s.candidates || [s],
+        selectedIdx: 0,
+    }));
+
     const color = LEG_COLORS[dayIdx % LEG_COLORS.length];
     const hdr   = document.createElement("div");
     hdr.className = "ev-stops-header";
     hdr.style.borderLeftColor = color;
-    hdr.innerHTML = `&#9889; ${stops.length} sosta${stops.length > 1 ? "e" : ""} di ricarica consigliata${stops.length > 1 ? "e" : ""}`;
+    hdr.innerHTML = `&#9889; ${stops.length} sosta${stops.length > 1 ? "e" : ""} di ricarica`;
     container.appendChild(hdr);
 
-    stops.forEach((stop) => {
-        const card = document.createElement("div");
+    stops.forEach((stop, stopIdx) => {
         if (stop.error) {
-            card.className = "ev-stop-card ev-stop-error";
-            card.innerHTML = `&#9888; ${escHtml(stop.message || "Stazione non trovata")} &mdash; km ${stop.route_km}`;
-            container.appendChild(card);
+            const err = document.createElement("div");
+            err.className = "ev-stop-card ev-stop-error";
+            err.innerHTML = `&#9888; ${escHtml(stop.message || "Stazione non trovata")} &mdash; km ${stop.route_km}`;
+            container.appendChild(err);
             return;
         }
-        const fallbackBadge = stop.fallback_nofilter
-            ? ' <span class="ev-fallback-badge ev-fallback-nofilter">senza filtri</span>'
-            : stop.fallback
-                ? ' <span class="ev-fallback-badge">fuori percorso</span>'
-                : "";
-        card.className = `ev-stop-card${stop.fallback ? " ev-stop-fallback" : ""}${stop.fallback_nofilter ? " ev-stop-fallback-nf" : ""}`;
-        card.innerHTML = `
-            <div class="ev-stop-info">
-                <div class="ev-stop-name">&#9889; ${escHtml(stop.name)}${fallbackBadge}</div>
-                <div class="ev-stop-addr">${escHtml(stop.address)}</div>
-                <div class="ev-stop-meta">
-                    <span class="ev-stop-kw">${stop.max_kw} kW</span>
-                    <span class="ev-stop-batt">${stop.battery_arrival_pct}% &#8594; ${stop.battery_after_pct}%</span>
-                    <span class="ev-stop-time">&#9201; ~${stop.charge_time_min} min</span>
-                    <span class="ev-stop-km">km ${stop.route_km}</span>
-                    ${stop.detour_km > 1 ? `<span class="ev-stop-detour">&#8645; ${stop.detour_km} km</span>` : ""}
-                </div>
-            </div>
-            <button class="ev-stop-add-btn">+ Aggiungi</button>`;
-        card.querySelector(".ev-stop-add-btn").addEventListener("click", () => addChargerAsWaypoint(stop, dayIdx));
-        container.appendChild(card);
 
-        if (stop.lat && stop.lon) addEvMarker(stop);
+        const candidates = stop.candidates || [stop];
+        const group = document.createElement("div");
+        group.className = "ev-stop-group";
+        group.id = `ev-stop-d${dayIdx}-s${stopIdx}`;
+
+        const battArrow = `${stop.battery_arrival_pct}%→${stop.battery_after_pct}%`;
+        group.innerHTML = `<div class="ev-stop-group-header">&#9889; Sosta al km ${stop.route_km} &mdash; &#128267; ${battArrow}</div>`;
+
+        const candsEl = document.createElement("div");
+        candsEl.className = "ev-candidates";
+
+        candidates.forEach((cand, candIdx) => {
+            const card = document.createElement("div");
+            card.className = "ev-candidate" + (candIdx === 0 ? " selected" : "");
+            card.onclick = () => selectEvCandidate(dayIdx, stopIdx, candIdx);
+
+            const rankLabel = candIdx === 0 ? "&#11088; Migliore" : candIdx === 1 ? "2° opzione" : "3° opzione";
+            const fallbackBadge = cand.fallback_nofilter
+                ? ' <span class="ev-fallback-badge ev-fallback-nofilter">senza filtri</span>'
+                : cand.fallback ? ' <span class="ev-fallback-badge">fuori percorso</span>' : "";
+
+            card.innerHTML = `
+                <div class="ev-cand-rank">${rankLabel}${fallbackBadge}</div>
+                <div class="ev-cand-name">${escHtml(cand.name)}</div>
+                <div class="ev-cand-addr">${escHtml(cand.address)}</div>
+                <div class="ev-cand-stats">
+                    <span class="ev-cand-detour" title="Detour andata+ritorno">&#8645; ${cand.detour_km} km</span>
+                    <span class="ev-cand-kw">${cand.max_kw} kW</span>
+                    <span class="ev-cand-time">&#9201; ${cand.charge_time_min} min</span>
+                    <span class="ev-cand-bat">&#128267; ${cand.battery_arrival_pct}%&#8594;${cand.battery_after_pct}%</span>
+                </div>
+                <button class="ev-cand-add">+ Aggiungi tappa</button>`;
+            card.querySelector(".ev-cand-add").addEventListener("click", (e) => {
+                e.stopPropagation();
+                addChargerAsWaypoint(cand, dayIdx);
+            });
+            candsEl.appendChild(card);
+        });
+
+        group.appendChild(candsEl);
+        container.appendChild(group);
+
+        if (candidates[0].lat && candidates[0].lon) addEvMarker(candidates[0], dayIdx, stopIdx);
     });
 }
 
-function addEvMarker(stop) {
+function selectEvCandidate(dayIdx, stopIdx, candIdx) {
+    const stopEntry = state.evStopData[`d${dayIdx}`]?.[stopIdx];
+    if (!stopEntry) return;
+    stopEntry.selectedIdx = candIdx;
+    const cand = stopEntry.candidates[candIdx];
+
+    // Update map marker
+    if (cand.lat && cand.lon) addEvMarker(cand, dayIdx, stopIdx);
+
+    // Update highlight
+    const group = document.getElementById(`ev-stop-d${dayIdx}-s${stopIdx}`);
+    group?.querySelectorAll(".ev-candidate").forEach((el, i) => el.classList.toggle("selected", i === candIdx));
+}
+
+function addEvMarker(stop, dayIdx, stopIdx) {
+    const key  = `d${dayIdx}s${stopIdx}`;
     const icon = L.divIcon({
         html:       `<div class="ev-map-marker">&#9889;</div>`,
         className:  "",
         iconSize:   [30, 30],
         iconAnchor: [15, 15],
     });
+    if (state.evMarkers[key]) state.evMarkers[key].remove();
     const m = L.marker([stop.lat, stop.lon], { icon })
-        .bindPopup(`<b>&#9889; ${stop.name}</b><br>${stop.address}<br><b>${stop.max_kw} kW</b> &mdash; ~${stop.charge_time_min} min di ricarica`);
+        .bindPopup(`<b>&#9889; ${stop.name}</b><br>${stop.address}<br><b>${stop.max_kw} kW</b> &mdash; ~${stop.charge_time_min} min`);
     if (state.evMarkersVisible) m.addTo(state.map);
-    state.evMarkers.push(m);
+    state.evMarkers[key] = m;
     document.getElementById("ev-map-toggle")?.classList.remove("hidden");
     _updateEvToggleBtn();
 }
 
 function clearEvMarkers() {
-    state.evMarkers.forEach((m) => m.remove());
-    state.evMarkers = [];
+    Object.values(state.evMarkers).forEach((m) => m.remove());
+    state.evMarkers = {};
     document.getElementById("ev-map-toggle")?.classList.add("hidden");
 }
 
 function toggleEvMarkers() {
     state.evMarkersVisible = !state.evMarkersVisible;
-    state.evMarkers.forEach((m) => {
+    Object.values(state.evMarkers).forEach((m) => {
         if (state.evMarkersVisible) m.addTo(state.map);
         else m.remove();
     });

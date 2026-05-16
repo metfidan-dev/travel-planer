@@ -724,43 +724,81 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         if fallback_nofilter: result["fallback_nofilter"] = True
         return result
 
+    def _score_stations(stations, fallback=False, fallback_nofilter=False):
+        """
+        For each station compute detour (2× distance to nearest route point)
+        and check reachability. Returns list sorted by (detour_km, route_km).
+        """
+        results = []
+        for st in stations:
+            slat = st.get("lat")
+            slon = st.get("lon")
+            if slat is None or slon is None:
+                continue
+            # nearest route candidate point
+            best_d   = float("inf")
+            best_loc = None
+            for loc in cands:
+                d = _haversine(loc[1], loc[0], slon, slat)
+                if d < best_d:
+                    best_d   = d
+                    best_loc = loc
+            lat_r, lon_r, arr_kwh, km = best_loc
+            bat_at_station = arr_kwh - best_d * consumption_km
+            if bat_at_station < min_kwh:
+                continue                          # unreachable with available charge
+            kw      = min(max_dc_kw, st.get("max_kw") or max_dc_kw)
+            entry   = {
+                **st,
+                "battery_arrival_pct": round(bat_at_station / battery_kwh * 100, 1),
+                "battery_after_pct":   round(max_kwh / battery_kwh * 100, 1),
+                "charge_time_min":     _calc_charge_time(bat_at_station, max_kwh, battery_kwh, kw),
+                "route_km":            km,
+                "detour_km":           round(best_d * 2, 1),
+            }
+            if fallback:          entry["fallback"]          = True
+            if fallback_nofilter: entry["fallback_nofilter"] = True
+            results.append(entry)
+        # primary sort: minimum detour; tiebreaker: earliest on route
+        results.sort(key=lambda c: (c["detour_km"], c["route_km"]))
+        return results
+
     def resolve_stop(cands):
         lats = [c[0] for c in cands]
         lons = [c[1] for c in cands]
-        # bounding box that encloses all candidate points + corridor buffer
         buf  = corridor_km / 111.0
         bbox = (min(lats) - buf, min(lons) - buf,
                 max(lats) + buf, max(lons) + buf)
 
-        # Tier 1: single bbox query → all stations in zone with filters
-        #         pick the one closest to the route line (not just to one point)
-        stations = _find_ocm_bbox(bbox, connector_ids, min_kw)
-        station, loc = _closest_on_route(stations, cands, corridor_km)
-        if station:
-            return _build_result(station, loc)
+        # Tier 1: bbox query with preferred connector/power filters
+        stations  = _find_ocm_bbox(bbox, connector_ids, min_kw)
+        scored    = _score_stations(stations)
 
-        # Tier 2: same results, wider corridor (2×) — no extra API call
-        station, loc = _closest_on_route(stations, cands, corridor_km * 2)
-        if station:
-            return _build_result(station, loc, fallback=True)
+        # Tier 2 (no extra call): same results, wider corridor — marks as fallback
+        if not scored:
+            scored = _score_stations(stations, fallback=True)
 
-        # Tier 3: bbox query without connector/power filters
-        stations_nf = _find_ocm_bbox(bbox, [], 0)
-        station, loc = _closest_on_route(stations_nf, cands, corridor_km * 2)
-        if station:
-            return _build_result(station, loc, fallback=True, fallback_nofilter=True)
+        # Tier 3: bbox query without any filters
+        if not scored:
+            stations_nf = _find_ocm_bbox(bbox, [], 0)
+            scored = _score_stations(stations_nf, fallback=True, fallback_nofilter=True)
 
-        # Tier 4: Overpass/OSM — free, no key, last candidate as center
-        last    = cands[-1]
-        station = _find_overpass_station(last[0], last[1],
-                                         radius_m=int(corridor_km * 2000))
-        if station:
-            return _build_result(station, last, fallback=True, fallback_nofilter=True)
+        # Tier 4: Overpass/OSM — free, no API key needed
+        if not scored:
+            last = cands[-1]
+            st   = _find_overpass_station(last[0], last[1],
+                                          radius_m=int(corridor_km * 2000))
+            if st:
+                scored = _score_stations([st], fallback=True, fallback_nofilter=True)
 
-        lat, lon, arr_kwh, km = last
-        return {"error": True, "lat": lat, "lon": lon,
-                "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
-                "route_km": km, "message": "Nessuna stazione di ricarica trovata"}
+        if not scored:
+            lat, lon, arr_kwh, km = cands[-1]
+            return {"error": True, "lat": lat, "lon": lon,
+                    "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
+                    "route_km": km, "message": "Nessuna stazione di ricarica trovata"}
+
+        top3   = scored[:3]
+        return {**top3[0], "candidates": top3}
 
     with ThreadPoolExecutor(max_workers=min(len(stops_cands), 5)) as ex:
         return list(ex.map(resolve_stop, stops_cands))
