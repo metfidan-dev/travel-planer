@@ -364,11 +364,17 @@ body {
     background: #fff8ee; border: 1px solid #f5c07a;
     border-radius: 8px; padding: 8px 10px; margin-bottom: 6px;
 }
-.ev-stop-card.ev-stop-fallback { border-color: #f0a500; background: #fffbf0; }
+.ev-stop-card.ev-stop-fallback    { border-color: #f0a500; background: #fffbf0; }
+.ev-stop-card.ev-stop-fallback-nf { border-color: #c0a0e0; background: #faf5ff; }
 .ev-fallback-badge {
     font-size: 9px; font-weight: 700; color: #b07800;
     background: #fff3c0; border: 1px solid #f0c040;
     border-radius: 4px; padding: 0 4px; vertical-align: middle; margin-left: 4px;
+}
+.ev-fallback-badge.ev-fallback-nofilter { color: #6a3aaa; background: #f0e8ff; border-color: #c090e0; }
+.ev-stop-detour {
+    font-size: 10px; color: #9060c0; background: #f5eeff;
+    border: 1px solid #c090e0; border-radius: 4px; padding: 1px 5px;
 }
 .ev-stop-card.ev-stop-error {
     background: #fff0f0; border-color: #f5a0a0; color: #c0392b; font-size: 11px;

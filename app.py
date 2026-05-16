@@ -688,18 +688,25 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
     if not stops_cands:
         return []
 
-    # Phase 2 – resolve each stop: parallel OCM queries across candidates, with fallback
-    def _build_result(station, loc):
+    # Phase 2 – resolve each stop: parallel OCM queries across candidates, then unlimited fallbacks
+    def _build_result(station, loc, fallback=False, fallback_nofilter=False):
         lat, lon, arr_kwh, km = loc
-        kw = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
-        return {**station,
-                "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
-                "battery_after_pct":   round(max_kwh  / battery_kwh * 100, 1),
-                "charge_time_min":     _calc_charge_time(arr_kwh, max_kwh, battery_kwh, kw),
-                "route_km":            km}
+        kw       = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
+        slat     = station.get("lat") or lat
+        slon     = station.get("lon") or lon
+        detour   = round(_haversine(lon, lat, slon, slat), 1)
+        result   = {**station,
+                    "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
+                    "battery_after_pct":   round(max_kwh  / battery_kwh * 100, 1),
+                    "charge_time_min":     _calc_charge_time(arr_kwh, max_kwh, battery_kwh, kw),
+                    "route_km":            km,
+                    "detour_km":           detour}
+        if fallback:          result["fallback"]          = True
+        if fallback_nofilter: result["fallback_nofilter"] = True
+        return result
 
     def resolve_stop(cands):
-        # Try all candidate locations in parallel with preferred filters (20 km)
+        # Attempt 1: all candidate points in parallel, 20 km, preferred filters
         with ThreadPoolExecutor(max_workers=len(cands)) as inner:
             ocm_results = list(inner.map(
                 lambda loc: (_find_ocm_station(loc[0], loc[1], connector_ids, min_kw, radius_km=20), loc),
@@ -709,16 +716,21 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
             if station:
                 return _build_result(station, loc)
 
-        # Fallback: last candidate, 40 km radius, no connector/power filter
-        last = cands[-1]
-        station = _find_ocm_station(last[0], last[1], [], 0, radius_km=40)
+        # Attempt 2: nearest station anywhere (no radius limit), same connector/power filters
+        last    = cands[-1]
+        station = _find_ocm_station(last[0], last[1], connector_ids, min_kw, radius_km=300)
         if station:
-            return {**_build_result(station, last), "fallback": True}
+            return _build_result(station, last, fallback=True)
+
+        # Attempt 3: nearest station anywhere, no filters at all
+        station = _find_ocm_station(last[0], last[1], [], 0, radius_km=300)
+        if station:
+            return _build_result(station, last, fallback=True, fallback_nofilter=True)
 
         lat, lon, arr_kwh, km = last
         return {"error": True, "lat": lat, "lon": lon,
                 "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
-                "route_km": km, "message": "Nessuna stazione trovata nel raggio di 40 km"}
+                "route_km": km, "message": "Nessuna stazione di ricarica trovata"}
 
     with ThreadPoolExecutor(max_workers=min(len(stops_cands), 5)) as ex:
         return list(ex.map(resolve_stop, stops_cands))

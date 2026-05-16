@@ -1090,16 +1090,22 @@ function renderEvStops(dayIdx, stops) {
             container.appendChild(card);
             return;
         }
-        card.className = `ev-stop-card${stop.fallback ? " ev-stop-fallback" : ""}`;
+        const fallbackBadge = stop.fallback_nofilter
+            ? ' <span class="ev-fallback-badge ev-fallback-nofilter">senza filtri</span>'
+            : stop.fallback
+                ? ' <span class="ev-fallback-badge">fuori percorso</span>'
+                : "";
+        card.className = `ev-stop-card${stop.fallback ? " ev-stop-fallback" : ""}${stop.fallback_nofilter ? " ev-stop-fallback-nf" : ""}`;
         card.innerHTML = `
             <div class="ev-stop-info">
-                <div class="ev-stop-name">&#9889; ${escHtml(stop.name)}${stop.fallback ? ' <span class="ev-fallback-badge">raggio esteso</span>' : ""}</div>
+                <div class="ev-stop-name">&#9889; ${escHtml(stop.name)}${fallbackBadge}</div>
                 <div class="ev-stop-addr">${escHtml(stop.address)}</div>
                 <div class="ev-stop-meta">
                     <span class="ev-stop-kw">${stop.max_kw} kW</span>
                     <span class="ev-stop-batt">${stop.battery_arrival_pct}% &#8594; ${stop.battery_after_pct}%</span>
                     <span class="ev-stop-time">&#9201; ~${stop.charge_time_min} min</span>
                     <span class="ev-stop-km">km ${stop.route_km}</span>
+                    ${stop.detour_km > 1 ? `<span class="ev-stop-detour">&#8645; ${stop.detour_km} km</span>` : ""}
                 </div>
             </div>
             <button class="ev-stop-add-btn">+ Aggiungi</button>`;
