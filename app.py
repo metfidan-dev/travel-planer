@@ -724,7 +724,7 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         if fallback_nofilter: result["fallback_nofilter"] = True
         return result
 
-    def _score_stations(stations, fallback=False, fallback_nofilter=False):
+    def _score_stations(stations, cands, fallback=False, fallback_nofilter=False):
         """
         For each station compute detour (2× distance to nearest route point)
         and check reachability. Returns list sorted by (detour_km, route_km).
@@ -772,16 +772,16 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
 
         # Tier 1: bbox query with preferred connector/power filters
         stations  = _find_ocm_bbox(bbox, connector_ids, min_kw)
-        scored    = _score_stations(stations)
+        scored    = _score_stations(stations, cands)
 
         # Tier 2 (no extra call): same results, wider corridor — marks as fallback
         if not scored:
-            scored = _score_stations(stations, fallback=True)
+            scored = _score_stations(stations, cands, fallback=True)
 
         # Tier 3: bbox query without any filters
         if not scored:
             stations_nf = _find_ocm_bbox(bbox, [], 0)
-            scored = _score_stations(stations_nf, fallback=True, fallback_nofilter=True)
+            scored = _score_stations(stations_nf, cands, fallback=True, fallback_nofilter=True)
 
         # Tier 4: Overpass/OSM — free, no API key needed
         if not scored:
@@ -789,7 +789,7 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             st   = _find_overpass_station(last[0], last[1],
                                           radius_m=int(corridor_km * 2000))
             if st:
-                scored = _score_stations([st], fallback=True, fallback_nofilter=True)
+                scored = _score_stations([st], cands, fallback=True, fallback_nofilter=True)
 
         if not scored:
             lat, lon, arr_kwh, km = cands[-1]
