@@ -1090,10 +1090,10 @@ function renderEvStops(dayIdx, stops) {
             container.appendChild(card);
             return;
         }
-        card.className = "ev-stop-card";
+        card.className = `ev-stop-card${stop.fallback ? " ev-stop-fallback" : ""}`;
         card.innerHTML = `
             <div class="ev-stop-info">
-                <div class="ev-stop-name">&#9889; ${escHtml(stop.name)}</div>
+                <div class="ev-stop-name">&#9889; ${escHtml(stop.name)}${stop.fallback ? ' <span class="ev-fallback-badge">raggio esteso</span>' : ""}</div>
                 <div class="ev-stop-addr">${escHtml(stop.address)}</div>
                 <div class="ev-stop-meta">
                     <span class="ev-stop-kw">${stop.max_kw} kW</span>

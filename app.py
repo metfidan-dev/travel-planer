@@ -657,37 +657,71 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
     alert_kwh      = min_kwh + battery_kwh * 0.15
 
     # Phase 1 – pure math, no network: find WHERE charging is needed
-    needed     = []   # (lat, lon, arr_kwh, route_km)
-    cumulative = 0.0
+    # Search window: start sampling candidates 20% of total range before depletion
+    window_km        = max(20.0, 0.20 * battery_kwh / consumption_km)
+    search_start_kwh = alert_kwh + window_km * consumption_km
+
+    # Phase 1 – pure math: collect candidate search points for each needed stop
+    stops_cands  = []   # list of lists
+    candidates   = []
+    last_cand_km = -999.0
+    cumulative   = 0.0
+
     for i in range(1, len(coords)):
         seg          = _haversine(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1])
         cumulative  += seg
         current_kwh -= seg * consumption_km
-        if current_kwh <= alert_kwh:
-            needed.append((coords[i][1], coords[i][0], max(current_kwh, 0), round(cumulative, 1)))
-            current_kwh = max_kwh   # assume charging, continue simulation
 
-    if not needed:
+        # Within the search window: sample a candidate every ~20 km
+        if current_kwh <= search_start_kwh and cumulative - last_cand_km >= 20.0:
+            candidates.append((coords[i][1], coords[i][0], max(current_kwh, 0.0), round(cumulative, 1)))
+            last_cand_km = cumulative
+
+        if current_kwh <= alert_kwh:
+            if not candidates:   # degenerate case: very steep consumption
+                candidates.append((coords[i][1], coords[i][0], max(current_kwh, 0.0), round(cumulative, 1)))
+            stops_cands.append(candidates)
+            candidates   = []
+            last_cand_km = cumulative
+            current_kwh  = max_kwh   # simulate charging, continue
+
+    if not stops_cands:
         return []
 
-    # Phase 2 – parallel OCM lookups (one per stop, not one per coordinate)
-    def fetch(loc):
+    # Phase 2 – resolve each stop: parallel OCM queries across candidates, with fallback
+    def _build_result(station, loc):
         lat, lon, arr_kwh, km = loc
-        arr_pct = round(arr_kwh / battery_kwh * 100, 1)
-        station = _find_ocm_station(lat, lon, connector_ids, min_kw)
-        if station:
-            kw = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
-            return {**station,
-                    "battery_arrival_pct": arr_pct,
-                    "battery_after_pct":   round(max_kwh / battery_kwh * 100, 1),
-                    "charge_time_min":     _calc_charge_time(arr_kwh, max_kwh, battery_kwh, kw),
-                    "route_km":            km}
-        return {"error": True, "lat": lat, "lon": lon,
-                "battery_arrival_pct": arr_pct, "route_km": km,
-                "message": "Nessuna stazione trovata in zona"}
+        kw = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
+        return {**station,
+                "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
+                "battery_after_pct":   round(max_kwh  / battery_kwh * 100, 1),
+                "charge_time_min":     _calc_charge_time(arr_kwh, max_kwh, battery_kwh, kw),
+                "route_km":            km}
 
-    with ThreadPoolExecutor(max_workers=min(len(needed), 5)) as ex:
-        return list(ex.map(fetch, needed))
+    def resolve_stop(cands):
+        # Try all candidate locations in parallel with preferred filters (20 km)
+        with ThreadPoolExecutor(max_workers=len(cands)) as inner:
+            ocm_results = list(inner.map(
+                lambda loc: (_find_ocm_station(loc[0], loc[1], connector_ids, min_kw, radius_km=20), loc),
+                cands
+            ))
+        for station, loc in ocm_results:
+            if station:
+                return _build_result(station, loc)
+
+        # Fallback: last candidate, 40 km radius, no connector/power filter
+        last = cands[-1]
+        station = _find_ocm_station(last[0], last[1], [], 0, radius_km=40)
+        if station:
+            return {**_build_result(station, last), "fallback": True}
+
+        lat, lon, arr_kwh, km = last
+        return {"error": True, "lat": lat, "lon": lon,
+                "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
+                "route_km": km, "message": "Nessuna stazione trovata nel raggio di 40 km"}
+
+    with ThreadPoolExecutor(max_workers=min(len(stops_cands), 5)) as ex:
+        return list(ex.map(resolve_stop, stops_cands))
 
 
 def _calc_charge_time(current_kwh, target_kwh, battery_kwh, charger_kw):
@@ -705,20 +739,23 @@ def _calc_charge_time(current_kwh, target_kwh, battery_kwh, charger_kw):
     return round((to_80 / kw + above80 / (kw * 0.5)) * 60)
 
 
-def _find_ocm_station(lat, lon, connector_ids, min_kw, radius_km=15):
+def _find_ocm_station(lat, lon, connector_ids, min_kw, radius_km=20):
+    params = {
+        "output":       "json",
+        "latitude":     lat,
+        "longitude":    lon,
+        "distance":     radius_km,
+        "distanceunit": "km",
+        "maxresults":   5,
+        "compact":      "true",
+        "verbose":      "false",
+    }
+    if connector_ids:
+        params["connectiontypeid"] = ",".join(str(c) for c in connector_ids)
+    if min_kw and min_kw > 0:
+        params["minpowerkw"] = min_kw
     try:
-        resp = requests.get(OCM_URL, params={
-            "output":           "json",
-            "latitude":         lat,
-            "longitude":        lon,
-            "distance":         radius_km,
-            "distanceunit":     "km",
-            "connectiontypeid": ",".join(str(c) for c in connector_ids),
-            "minpowerkw":       min_kw,
-            "maxresults":       5,
-            "compact":          "true",
-            "verbose":          "false",
-        }, headers=HEADERS, timeout=10)
+        resp = requests.get(OCM_URL, params=params, headers=HEADERS, timeout=10)
         data = resp.json()
     except Exception:
         return None
