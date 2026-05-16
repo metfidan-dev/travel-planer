@@ -665,12 +665,15 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
     full_range_km = battery_kwh / consumption_km
     window_km     = max(interval_km * 3, full_range_km * 0.15)
 
-    # Phase 1 – walk geometry, interpolate sample points every interval_km
-    # (same approach as weather/traffic sampling)
-    stops_cands = []
-    candidates  = []
-    cumulative  = 0.0
-    next_sample = float(interval_km)
+    # Phase 1 – walk geometry, collecting:
+    #   - sample points every interval_km (for battery estimation + bounding box)
+    #   - raw route coords in each window (for accurate distance-to-road measurement)
+    stops_cands      = []
+    stops_window_pts = []   # dense route points (lat, lon) in each stop's window
+    candidates       = []
+    window_pts       = []   # raw (lat, lon, cumulative_km) for current window
+    cumulative       = 0.0
+    next_sample      = float(interval_km)
 
     for i in range(1, len(coords)):
         p0  = coords[i - 1]
@@ -683,7 +686,10 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         cumulative  += seg
         current_kwh -= seg * consumption_km
 
-        # Interpolate sample points within this segment
+        # Collect every raw route coord for accurate distance-to-road measurement
+        window_pts.append((p1[1], p1[0], cumulative))
+
+        # Interpolate sample points (for battery estimation)
         while next_sample <= cumulative:
             frac  = (next_sample - prev_cum) / seg
             s_lon = p0[0] + frac * (p1[0] - p0[0])
@@ -693,14 +699,17 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             next_sample += interval_km
 
         if current_kwh <= alert_kwh:
-            # Keep only candidates in the window before this alert point
             window_start = cumulative - window_km
             window_cands = [c for c in candidates if c[3] >= window_start]
+            raw_pts = [(w[0], w[1]) for w in window_pts if w[2] >= window_start]
             if not window_cands:
                 window_cands = [(p1[1], p1[0], max(current_kwh, 0.0), round(cumulative, 1))]
-            # Cap to 10 candidates to bound API calls
+            if not raw_pts:
+                raw_pts = [(p1[1], p1[0])]
             stops_cands.append(window_cands[-10:])
+            stops_window_pts.append(raw_pts)
             candidates  = []
+            window_pts  = []
             next_sample = cumulative + interval_km
             current_kwh = max_kwh
 
@@ -724,10 +733,14 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         if fallback_nofilter: result["fallback_nofilter"] = True
         return result
 
-    def _score_stations(stations, cands, fallback=False, fallback_nofilter=False):
+    def _score_stations(stations, cands, window_pts, fallback=False, fallback_nofilter=False):
         """
-        For each station compute detour (2× distance to nearest route point)
-        and check reachability. Returns list sorted by (detour_km, route_km).
+        Score each station by its true detour from the route:
+        - best_d = min distance from station to any raw route coord in the window
+          (uses the dense OSRM geometry, not just the coarse sample points)
+        - detour_km = best_d * 2  (round trip)
+        - battery check uses nearest sample point for energy estimation
+        - Sort: min detour first, then earliest position on route
         """
         results = []
         for st in stations:
@@ -735,20 +748,26 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             slon = st.get("lon")
             if slat is None or slon is None:
                 continue
-            # nearest route candidate point
-            best_d   = float("inf")
-            best_loc = None
+
+            # True distance from station to the road (dense geometry)
+            best_d = min(_haversine(wlat, wlon, slon, slat)
+                         for wlat, wlon in window_pts)
+
+            # Nearest sample point → battery estimation + route_km
+            best_cand_d = float("inf")
+            best_loc    = None
             for loc in cands:
                 d = _haversine(loc[1], loc[0], slon, slat)
-                if d < best_d:
-                    best_d   = d
-                    best_loc = loc
+                if d < best_cand_d:
+                    best_cand_d = d
+                    best_loc    = loc
             lat_r, lon_r, arr_kwh, km = best_loc
             bat_at_station = arr_kwh - best_d * consumption_km
             if bat_at_station < min_kwh:
-                continue                          # unreachable with available charge
-            kw      = min(max_dc_kw, st.get("max_kw") or max_dc_kw)
-            entry   = {
+                continue                       # unreachable with available charge
+
+            kw    = min(max_dc_kw, st.get("max_kw") or max_dc_kw)
+            entry = {
                 **st,
                 "battery_arrival_pct": round(bat_at_station / battery_kwh * 100, 1),
                 "battery_after_pct":   round(max_kwh / battery_kwh * 100, 1),
@@ -759,11 +778,11 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             if fallback:          entry["fallback"]          = True
             if fallback_nofilter: entry["fallback_nofilter"] = True
             results.append(entry)
-        # primary sort: minimum detour; tiebreaker: earliest on route
+
         results.sort(key=lambda c: (c["detour_km"], c["route_km"]))
         return results
 
-    def resolve_stop(cands):
+    def resolve_stop(cands, window_pts):
         lats = [c[0] for c in cands]
         lons = [c[1] for c in cands]
         buf  = corridor_km / 111.0
@@ -771,17 +790,18 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
                 max(lats) + buf, max(lons) + buf)
 
         # Tier 1: bbox query with preferred connector/power filters
-        stations  = _find_ocm_bbox(bbox, connector_ids, min_kw)
-        scored    = _score_stations(stations, cands)
+        stations = _find_ocm_bbox(bbox, connector_ids, min_kw)
+        scored   = _score_stations(stations, cands, window_pts)
 
-        # Tier 2 (no extra call): same results, wider corridor — marks as fallback
+        # Tier 2 (no extra call): same OCM results, relax reachability — mark fallback
         if not scored:
-            scored = _score_stations(stations, cands, fallback=True)
+            scored = _score_stations(stations, cands, window_pts, fallback=True)
 
-        # Tier 3: bbox query without any filters
+        # Tier 3: bbox query without any connector/power filters
         if not scored:
             stations_nf = _find_ocm_bbox(bbox, [], 0)
-            scored = _score_stations(stations_nf, cands, fallback=True, fallback_nofilter=True)
+            scored = _score_stations(stations_nf, cands, window_pts,
+                                     fallback=True, fallback_nofilter=True)
 
         # Tier 4: Overpass/OSM — free, no API key needed
         if not scored:
@@ -789,7 +809,8 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             st   = _find_overpass_station(last[0], last[1],
                                           radius_m=int(corridor_km * 2000))
             if st:
-                scored = _score_stations([st], cands, fallback=True, fallback_nofilter=True)
+                scored = _score_stations([st], cands, window_pts,
+                                         fallback=True, fallback_nofilter=True)
 
         if not scored:
             lat, lon, arr_kwh, km = cands[-1]
@@ -797,11 +818,12 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
                     "battery_arrival_pct": round(arr_kwh / battery_kwh * 100, 1),
                     "route_km": km, "message": "Nessuna stazione di ricarica trovata"}
 
-        top3   = scored[:3]
+        top3 = scored[:3]
         return {**top3[0], "candidates": top3}
 
     with ThreadPoolExecutor(max_workers=min(len(stops_cands), 5)) as ex:
-        return list(ex.map(resolve_stop, stops_cands))
+        return list(ex.map(lambda p: resolve_stop(*p),
+                           zip(stops_cands, stops_window_pts)))
 
 
 def _calc_charge_time(current_kwh, target_kwh, battery_kwh, charger_kw):
