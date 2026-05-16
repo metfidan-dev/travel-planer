@@ -678,6 +678,36 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
     zone_pts    = []   # route coords since last charge (lat, lon, km)
     cumulative  = 0.0
     next_sample = float(interval_km)
+    alert_fired = False   # True once current_kwh <= alert_kwh
+    alert_km    = 0.0     # cumulative km when alert fired
+
+    def _finalize_stop(cur_lat, cur_lon):
+        """Append one charging stop from accumulated candidates/zone_pts."""
+        # Primary window: last window_km before alert point
+        window_start = alert_km - window_km
+        w_cands = [c for c in candidates if window_start <= c[3] <= alert_km]
+        w_pts   = [(z[0], z[1]) for z in zone_pts if window_start <= z[2] <= alert_km]
+
+        # Full safe zone: from last charge → current position (includes posticipate)
+        z_cands = list(candidates)
+        z_pts   = [(z[0], z[1]) for z in zone_pts]
+        if len(z_pts) > 600:
+            step  = len(z_pts) // 600 + 1
+            z_pts = z_pts[::step]
+
+        if not w_cands:
+            w_cands = [(cur_lat, cur_lon, 0.0, round(alert_km, 1))]
+        if not w_pts:
+            w_pts = z_pts or [(cur_lat, cur_lon)]
+        if not z_cands:
+            z_cands = w_cands
+        if not z_pts:
+            z_pts = [(cur_lat, cur_lon)]
+
+        stops_cands.append(w_cands[-10:])
+        stops_window_pts.append(w_pts)
+        stops_zone_cands.append(z_cands)
+        stops_zone_pts.append(z_pts)
 
     for i in range(1, len(coords)):
         p0  = coords[i - 1]
@@ -700,38 +730,24 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             candidates.append((s_lat, s_lon, s_kwh, round(next_sample, 1)))
             next_sample += interval_km
 
-        if current_kwh <= alert_kwh:
-            # Primary window: last window_km before alert
-            window_start  = cumulative - window_km
-            w_cands = [c for c in candidates if c[3] >= window_start]
-            w_pts   = [(z[0], z[1]) for z in zone_pts if z[2] >= window_start]
+        # Mark when we enter the alert zone (optimal charge window begins)
+        if not alert_fired and current_kwh <= alert_kwh:
+            alert_fired = True
+            alert_km    = cumulative
 
-            # Full safe zone: everything since last charge
-            z_cands = list(candidates)
-            z_pts   = [(z[0], z[1]) for z in zone_pts]
-            # Subsample if very long route to keep computation fast
-            if len(z_pts) > 600:
-                step  = len(z_pts) // 600 + 1
-                z_pts = z_pts[::step]
-
-            if not w_cands:
-                w_cands = [(p1[1], p1[0], max(current_kwh, 0.0), round(cumulative, 1))]
-            if not w_pts:
-                w_pts = z_pts or [(p1[1], p1[0])]
-            if not z_cands:
-                z_cands = w_cands
-            if not z_pts:
-                z_pts = [(p1[1], p1[0])]
-
-            stops_cands.append(w_cands[-10:])
-            stops_window_pts.append(w_pts)
-            stops_zone_cands.append(z_cands)
-            stops_zone_pts.append(z_pts)
-
+        # Finalize stop only when we reach the true minimum (full posticipate zone)
+        if alert_fired and current_kwh <= min_kwh:
+            _finalize_stop(p1[1], p1[0])
             candidates  = []
             zone_pts    = []
             next_sample = cumulative + interval_km
             current_kwh = max_kwh
+            alert_fired = False
+            alert_km    = 0.0
+
+    # End of route: if alert fired but min_kwh never reached, still add the stop
+    if alert_fired and candidates:
+        _finalize_stop(coords[-1][1], coords[-1][0])
 
     if not stops_cands:
         return []
