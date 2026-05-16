@@ -15,6 +15,7 @@ const state = {
     compareWeather: {},  // keyed by "day-N"
     evVehicles: [],
     evMarkers: [],
+    evMarkersVisible: true,
     mapView: "none",
     mode: "driving",
     curvePref: 1,
@@ -943,6 +944,7 @@ function clearLegs() {
     clearAllWeatherMarkers();
     clearAllTrafficMarkers();
     clearEvMarkers();
+    state.evMarkersVisible = true;
     state.mapView        = "none";
     state.legs           = [];
     state.dayDates       = {};
@@ -1124,14 +1126,33 @@ function addEvMarker(stop) {
         iconAnchor: [15, 15],
     });
     const m = L.marker([stop.lat, stop.lon], { icon })
-        .addTo(state.map)
         .bindPopup(`<b>&#9889; ${stop.name}</b><br>${stop.address}<br><b>${stop.max_kw} kW</b> &mdash; ~${stop.charge_time_min} min di ricarica`);
+    if (state.evMarkersVisible) m.addTo(state.map);
     state.evMarkers.push(m);
+    document.getElementById("ev-map-toggle")?.classList.remove("hidden");
+    _updateEvToggleBtn();
 }
 
 function clearEvMarkers() {
     state.evMarkers.forEach((m) => m.remove());
     state.evMarkers = [];
+    document.getElementById("ev-map-toggle")?.classList.add("hidden");
+}
+
+function toggleEvMarkers() {
+    state.evMarkersVisible = !state.evMarkersVisible;
+    state.evMarkers.forEach((m) => {
+        if (state.evMarkersVisible) m.addTo(state.map);
+        else m.remove();
+    });
+    _updateEvToggleBtn();
+}
+
+function _updateEvToggleBtn() {
+    const btn = document.getElementById("btn-toggle-ev-markers");
+    if (!btn) return;
+    btn.classList.toggle("active", state.evMarkersVisible);
+    btn.title = state.evMarkersVisible ? "Nascondi stazioni EV" : "Mostra stazioni EV";
 }
 
 function addChargerAsWaypoint(stop, dayIdx) {

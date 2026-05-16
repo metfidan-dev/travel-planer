@@ -715,14 +715,14 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
             if station:
                 return _build_result(station, loc)
 
-        # Tier 2: last candidate, 300 km radius, same connector/power filters
+        # Tier 2: last candidate, 50 km radius, same connector/power filters
         last    = cands[-1]
-        station = _find_ocm_station(last[0], last[1], connector_ids, min_kw, radius_km=300)
+        station = _find_ocm_station(last[0], last[1], connector_ids, min_kw, radius_km=50)
         if station:
             return _build_result(station, last, fallback=True)
 
-        # Tier 3: last candidate, 300 km radius, no filters
-        station = _find_ocm_station(last[0], last[1], [], 0, radius_km=300)
+        # Tier 3: last candidate, 50 km radius, no filters
+        station = _find_ocm_station(last[0], last[1], [], 0, radius_km=50)
         if station:
             return _build_result(station, last, fallback=True, fallback_nofilter=True)
 
