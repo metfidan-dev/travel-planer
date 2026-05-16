@@ -20,6 +20,7 @@
                 <button class="mode-btn" data-mode="cycling" title="Bicicletta">&#128692; Bici</button>
                 <button class="mode-btn" data-mode="walking" title="A piedi">&#128694; Piedi</button>
                 <button class="mode-btn" data-mode="motorcycle" title="Moto">&#127949; Moto</button>
+                <button class="mode-btn" data-mode="electric" title="Auto Elettrica">&#9889; EV</button>
             </div>
 
             <!-- Preferenza curve: visibile solo in modalità Moto -->
@@ -38,6 +39,75 @@
         </div>
 
         <div id="sidebar-body">
+
+            <!-- EV Panel: visibile solo in modalità EV -->
+            <div id="ev-panel" class="hidden">
+                <div class="ev-section">
+                    <div class="ev-section-title">&#128663; Veicolo</div>
+                    <select id="ev-vehicle-select" onchange="selectEvVehicle(this.value)">
+                        <option value="">-- Seleziona modello --</option>
+                    </select>
+                    <div class="ev-specs-grid">
+                        <div class="ev-spec-cell">
+                            <label>Autonomia (km)</label>
+                            <input id="ev-range" class="ev-spec-input" type="number" min="50" max="1200" value="400" />
+                        </div>
+                        <div class="ev-spec-cell">
+                            <label>Consumo (kWh/100km)</label>
+                            <input id="ev-consumption" class="ev-spec-input" type="number" min="5" max="60" step="0.1" value="17" />
+                        </div>
+                        <div class="ev-spec-cell">
+                            <label>Batteria (kWh)</label>
+                            <input id="ev-battery-kwh" class="ev-spec-input" type="number" min="10" max="250" step="0.5" value="60" />
+                        </div>
+                        <div class="ev-spec-cell">
+                            <label>Ricarica max DC (kW)</label>
+                            <input id="ev-max-dc" class="ev-spec-input" type="number" min="7" max="400" value="100" />
+                        </div>
+                    </div>
+                </div>
+                <div class="ev-section">
+                    <div class="ev-section-title">&#128267; Batteria</div>
+                    <div class="ev-pct-row">
+                        <span class="ev-pct-label">Partenza</span>
+                        <input id="ev-start-pct" type="range" min="10" max="100" value="80" step="5"
+                               oninput="document.getElementById('ev-start-badge').textContent=this.value+'%'" />
+                        <span id="ev-start-badge" class="ev-pct-badge">80%</span>
+                    </div>
+                    <div class="ev-pct-row">
+                        <span class="ev-pct-label">Minimo</span>
+                        <input id="ev-min-pct" type="range" min="5" max="40" value="15" step="5"
+                               oninput="document.getElementById('ev-min-badge').textContent=this.value+'%'" />
+                        <span id="ev-min-badge" class="ev-pct-badge">15%</span>
+                    </div>
+                    <div class="ev-pct-row">
+                        <span class="ev-pct-label">Ricarica a</span>
+                        <input id="ev-max-pct" type="range" min="50" max="100" value="80" step="5"
+                               oninput="document.getElementById('ev-max-badge').textContent=this.value+'%'" />
+                        <span id="ev-max-badge" class="ev-pct-badge">80%</span>
+                    </div>
+                </div>
+                <div class="ev-section">
+                    <div class="ev-section-title">&#9889; Stazioni</div>
+                    <div class="ev-filter-row">
+                        <label>Connettore</label>
+                        <select id="ev-connector">
+                            <option value="33">CCS (Combo 2)</option>
+                            <option value="2">CHAdeMO</option>
+                            <option value="25">Type 2 AC</option>
+                        </select>
+                    </div>
+                    <div class="ev-filter-row">
+                        <label>Potenza min.</label>
+                        <select id="ev-min-kw">
+                            <option value="22">&#8805; 22 kW</option>
+                            <option value="50" selected>&#8805; 50 kW</option>
+                            <option value="100">&#8805; 100 kW</option>
+                            <option value="150">&#8805; 150 kW</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
 
             <!-- Salva / Carica itinerario -->
             <div id="save-load-section">

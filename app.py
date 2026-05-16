@@ -15,7 +15,43 @@ VALHALLA_URL   = "https://valhalla1.openstreetmap.de"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1"
 TOMTOM_ROUTING = "https://api.tomtom.com/routing/1/calculateRoute"
 TOMTOM_MODES   = {"driving": "car", "motorcycle": "motorcycle", "cycling": "bicycle", "walking": "pedestrian"}
+OCM_URL        = "https://api.openchargemap.io/v3/poi/"
 HEADERS        = {"User-Agent": "TravelPlannerApp/1.0 (educational project)"}
+
+# ===== EV VEHICLE DATABASE =====
+EV_VEHICLES = [
+    {"id": "tesla-m3-lr",    "brand": "Tesla",    "model": "Model 3 Long Range AWD",   "range_km": 568, "consumption": 14.3, "battery_kwh": 75.0,  "max_dc_kw": 250},
+    {"id": "tesla-m3-sr",    "brand": "Tesla",    "model": "Model 3 Standard Range",   "range_km": 438, "consumption": 14.0, "battery_kwh": 57.5,  "max_dc_kw": 170},
+    {"id": "tesla-my-lr",    "brand": "Tesla",    "model": "Model Y Long Range AWD",   "range_km": 533, "consumption": 16.0, "battery_kwh": 75.0,  "max_dc_kw": 250},
+    {"id": "tesla-ms-lr",    "brand": "Tesla",    "model": "Model S Long Range",       "range_km": 652, "consumption": 16.5, "battery_kwh": 100.0, "max_dc_kw": 250},
+    {"id": "vw-id4-pro",     "brand": "VW",       "model": "ID.4 Pro Performance",     "range_km": 522, "consumption": 16.5, "battery_kwh": 77.0,  "max_dc_kw": 135},
+    {"id": "vw-id3-pro",     "brand": "VW",       "model": "ID.3 Pro Performance",     "range_km": 426, "consumption": 15.4, "battery_kwh": 58.0,  "max_dc_kw": 100},
+    {"id": "bmw-ix3",        "brand": "BMW",      "model": "iX3",                      "range_km": 459, "consumption": 17.5, "battery_kwh": 74.0,  "max_dc_kw": 150},
+    {"id": "bmw-i4-m50",     "brand": "BMW",      "model": "i4 M50",                   "range_km": 521, "consumption": 16.0, "battery_kwh": 80.7,  "max_dc_kw": 205},
+    {"id": "hyundai-i5-lr",  "brand": "Hyundai",  "model": "IONIQ 5 Long Range AWD",   "range_km": 481, "consumption": 18.0, "battery_kwh": 77.4,  "max_dc_kw": 220},
+    {"id": "hyundai-i6-lr",  "brand": "Hyundai",  "model": "IONIQ 6 Long Range RWD",   "range_km": 614, "consumption": 14.0, "battery_kwh": 77.4,  "max_dc_kw": 220},
+    {"id": "kia-ev6-lr",     "brand": "Kia",      "model": "EV6 Long Range AWD",       "range_km": 506, "consumption": 18.0, "battery_kwh": 77.4,  "max_dc_kw": 220},
+    {"id": "kia-ev9-lr",     "brand": "Kia",      "model": "EV9 Long Range AWD",       "range_km": 512, "consumption": 21.0, "battery_kwh": 99.8,  "max_dc_kw": 240},
+    {"id": "audi-q4-50",     "brand": "Audi",     "model": "Q4 e-tron 50 quattro",     "range_km": 490, "consumption": 18.0, "battery_kwh": 77.0,  "max_dc_kw": 135},
+    {"id": "audi-et-55",     "brand": "Audi",     "model": "e-tron 55 quattro",        "range_km": 446, "consumption": 24.0, "battery_kwh": 95.0,  "max_dc_kw": 150},
+    {"id": "merc-eqs",       "brand": "Mercedes", "model": "EQS 450+",                 "range_km": 770, "consumption": 15.7, "battery_kwh": 107.8, "max_dc_kw": 200},
+    {"id": "merc-eqa",       "brand": "Mercedes", "model": "EQA 300 4MATIC",           "range_km": 462, "consumption": 17.7, "battery_kwh": 66.5,  "max_dc_kw": 100},
+    {"id": "peugeot-e208",   "brand": "Peugeot",  "model": "e-208 50 kWh",             "range_km": 362, "consumption": 14.6, "battery_kwh": 50.0,  "max_dc_kw": 100},
+    {"id": "renault-meg",    "brand": "Renault",  "model": "Mégane E-Tech EV60",  "range_km": 450, "consumption": 14.5, "battery_kwh": 60.0,  "max_dc_kw": 130},
+    {"id": "renault-zoe",    "brand": "Renault",  "model": "Zoe R135 Z.E. 50",         "range_km": 395, "consumption": 17.2, "battery_kwh": 52.0,  "max_dc_kw": 50},
+    {"id": "fiat-500e",      "brand": "Fiat",     "model": "500e 42 kWh",              "range_km": 320, "consumption": 14.0, "battery_kwh": 37.3,  "max_dc_kw": 85},
+    {"id": "opel-mokka-e",   "brand": "Opel",     "model": "Mokka-e 50 kWh",           "range_km": 338, "consumption": 16.5, "battery_kwh": 50.0,  "max_dc_kw": 100},
+    {"id": "nissan-leaf+",   "brand": "Nissan",   "model": "Leaf e+ 62 kWh",           "range_km": 385, "consumption": 18.0, "battery_kwh": 59.0,  "max_dc_kw": 50},
+    {"id": "volvo-xc40",     "brand": "Volvo",    "model": "XC40 Recharge Single",     "range_km": 423, "consumption": 21.0, "battery_kwh": 69.0,  "max_dc_kw": 150},
+    {"id": "volvo-c40",      "brand": "Volvo",    "model": "C40 Recharge AWD",         "range_km": 510, "consumption": 19.0, "battery_kwh": 82.0,  "max_dc_kw": 150},
+    {"id": "skoda-enyaq",    "brand": "Škoda", "model": "ENYAQ iV 80",            "range_km": 530, "consumption": 16.5, "battery_kwh": 77.0,  "max_dc_kw": 125},
+    {"id": "ford-mach-e",    "brand": "Ford",     "model": "Mustang Mach-E AWD Ext.",  "range_km": 490, "consumption": 21.5, "battery_kwh": 91.0,  "max_dc_kw": 150},
+    {"id": "polestar-2-lr",  "brand": "Polestar", "model": "2 Long Range Dual Motor",  "range_km": 476, "consumption": 19.0, "battery_kwh": 78.0,  "max_dc_kw": 205},
+    {"id": "byd-atto3",      "brand": "BYD",      "model": "ATTO 3 Long Range",        "range_km": 420, "consumption": 15.7, "battery_kwh": 60.5,  "max_dc_kw": 80},
+    {"id": "byd-seal",       "brand": "BYD",      "model": "Seal 82.5 kWh AWD",        "range_km": 570, "consumption": 16.5, "battery_kwh": 82.5,  "max_dc_kw": 150},
+    {"id": "mg4-64",         "brand": "MG",       "model": "MG4 Electric 64 kWh",      "range_km": 450, "consumption": 15.5, "battery_kwh": 61.7,  "max_dc_kw": 135},
+    {"id": "cupra-born",     "brand": "Cupra",    "model": "Born 170hp 58 kWh",        "range_km": 424, "consumption": 15.4, "battery_kwh": 58.0,  "max_dc_kw": 100},
+]
 
 WMO_DESCRIPTIONS = {
     0: "Cielo sereno", 1: "Prevalentemente sereno", 2: "Parzialmente nuvoloso", 3: "Nuvoloso",
@@ -111,6 +147,8 @@ def calculate_route():
                 result = _call_valhalla_per_leg(waypoints, curves_per_leg)
             else:
                 result = _call_valhalla(waypoints, curves)
+        elif profile == "electric":
+            result = _call_osrm(waypoints, "driving")
         else:
             result = _call_osrm(waypoints, profile)
         return jsonify(result)
@@ -583,6 +621,125 @@ def _blend_traffic(tomtom_level, heuristic_level):
     euristica per orario (30%) per ottenere la stima punto per punto.
     """
     return max(1, min(5, round(0.70 * tomtom_level + 0.30 * heuristic_level)))
+
+
+@app.route("/api/ev/vehicles")
+def ev_vehicles():
+    return jsonify(EV_VEHICLES)
+
+
+@app.route("/api/ev/charging-stops", methods=["POST"])
+def ev_charging_stops():
+    data          = request.get_json() or {}
+    geometry      = data.get("geometry")
+    ev            = data.get("ev", {})
+    battery       = data.get("battery", {})
+    connector_ids = data.get("connector_ids", [33])
+    min_kw        = int(data.get("min_kw", 50))
+
+    if not geometry or not ev or not battery:
+        return jsonify({"error": "Parametri mancanti"}), 400
+    try:
+        stops = _find_ev_stops(geometry, ev, battery, connector_ids, min_kw)
+        return jsonify(stops)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
+    coords           = geometry.get("coordinates", [])
+    consumption_km   = ev["consumption"] / 100          # kWh per km
+    battery_kwh      = float(ev["battery_kwh"])
+    max_dc_kw        = float(ev["max_dc_kw"])
+
+    current_kwh      = battery["start_pct"] / 100 * battery_kwh
+    min_kwh          = battery["min_pct"]   / 100 * battery_kwh
+    max_kwh          = battery["max_pct"]   / 100 * battery_kwh
+    alert_kwh        = min_kwh + battery_kwh * 0.15     # start searching 15 % before empty
+
+    stops        = []
+    cumulative   = 0.0
+
+    for i in range(1, len(coords)):
+        seg = _haversine(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1])
+        cumulative    += seg
+        current_kwh   -= seg * consumption_km
+
+        if current_kwh <= alert_kwh:
+            lat, lon = coords[i][1], coords[i][0]
+            arr_pct  = round(max(current_kwh, 0) / battery_kwh * 100, 1)
+            station  = _find_ocm_station(lat, lon, connector_ids, min_kw)
+
+            if station:
+                charger_kw = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
+                station["battery_arrival_pct"] = arr_pct
+                station["battery_after_pct"]   = round(max_kwh / battery_kwh * 100, 1)
+                station["charge_time_min"]      = _calc_charge_time(
+                    max(current_kwh, 0), max_kwh, battery_kwh, charger_kw)
+                station["route_km"]             = round(cumulative, 1)
+                stops.append(station)
+                current_kwh = max_kwh
+            else:
+                stops.append({"error": True, "lat": lat, "lon": lon,
+                               "battery_arrival_pct": arr_pct, "route_km": round(cumulative, 1),
+                               "message": "Nessuna stazione trovata in zona"})
+                current_kwh = min_kwh  # pessimistic: assume user found something minimal
+
+    return stops
+
+
+def _calc_charge_time(current_kwh, target_kwh, battery_kwh, charger_kw):
+    energy  = target_kwh - current_kwh
+    if energy <= 0:
+        return 0
+    p80     = 0.80 * battery_kwh
+    kw      = max(charger_kw, 1)
+    if target_kwh <= p80:
+        return round(energy / kw * 60)
+    if current_kwh >= p80:
+        return round(energy / (kw * 0.5) * 60)
+    to_80   = p80 - current_kwh
+    above80 = target_kwh - p80
+    return round((to_80 / kw + above80 / (kw * 0.5)) * 60)
+
+
+def _find_ocm_station(lat, lon, connector_ids, min_kw, radius_km=15):
+    try:
+        resp = requests.get(OCM_URL, params={
+            "output":           "json",
+            "latitude":         lat,
+            "longitude":        lon,
+            "distance":         radius_km,
+            "distanceunit":     "km",
+            "connectiontypeid": ",".join(str(c) for c in connector_ids),
+            "minpowerkw":       min_kw,
+            "maxresults":       5,
+            "compact":          "true",
+            "verbose":          "false",
+        }, headers=HEADERS, timeout=10)
+        data = resp.json()
+    except Exception:
+        return None
+
+    if not data or not isinstance(data, list):
+        return None
+
+    best  = data[0]
+    addr  = best.get("AddressInfo", {})
+    conns = best.get("Connections") or []
+    max_kw = max((c.get("PowerKW") or 0) for c in conns) if conns else 0
+    conn_names = list({c.get("ConnectionType", {}).get("Title", "")
+                       for c in conns if c.get("ConnectionType")})
+
+    return {
+        "lat":        addr.get("Latitude"),
+        "lon":        addr.get("Longitude"),
+        "name":       addr.get("Title", "Stazione di ricarica"),
+        "address":    f"{addr.get('AddressLine1', '')}, {addr.get('Town', '')}".strip(", "),
+        "max_kw":     round(float(max_kw), 1),
+        "connectors": conn_names[:3],
+        "ocm_id":     best.get("ID"),
+    }
 
 
 @app.route("/api/import-gmaps", methods=["POST"])

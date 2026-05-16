@@ -13,6 +13,8 @@ const state = {
     weatherGroups: {},   // keyed by "day-N"
     trafficGroups: {},   // keyed by "day-N"
     compareWeather: {},  // keyed by "day-N"
+    evVehicles: [],
+    evMarkers: [],
     mapView: "none",
     mode: "driving",
     curvePref: 1,
@@ -54,6 +56,8 @@ function bindControls() {
             btn.classList.add("active");
             state.mode = btn.dataset.mode;
             document.getElementById("curves-control").classList.toggle("hidden", state.mode !== "motorcycle");
+            document.getElementById("ev-panel").classList.toggle("hidden", state.mode !== "electric");
+            if (state.mode === "electric" && !state.evVehicles.length) loadEvVehicles();
             scheduleRecalculate();
         });
     });
@@ -383,6 +387,11 @@ async function calculateRoute(savedLegCurves = null) {
         drawLegsOnMap();
         buildLegsPanel(data.total_distance_km, data.total_duration_formatted);
 
+        clearEvMarkers();
+        if (state.mode === "electric") {
+            for (let d = 0; d <= maxDay; d++) fetchEvChargingStops(d);
+        }
+
         const allLL = state.legs.flatMap((l) => l.geometry.coordinates.map(([ln, lt]) => [lt, ln]));
         if (allLL.length) state.map.fitBounds(L.latLngBounds(allLL), { padding: [30, 30] });
 
@@ -481,6 +490,7 @@ function buildLegsPanel(totalDistKm, totalDurFmt) {
           <div class="seg-weather-container" id="seg-weather-day-${d}"></div>
           <div class="seg-traffic-container" id="seg-traffic-day-${d}"></div>
           <div class="seg-compare-panel hidden" id="seg-compare-day-${d}"></div>
+          <div class="ev-stops-container" id="ev-stops-day-${d}"></div>
         `;
         legsList.appendChild(sep);
 
@@ -932,9 +942,10 @@ function clearLegs() {
     state.legLayers = [];
     clearAllWeatherMarkers();
     clearAllTrafficMarkers();
-    state.mapView      = "none";
-    state.legs         = [];
-    state.dayDates     = {};
+    clearEvMarkers();
+    state.mapView        = "none";
+    state.legs           = [];
+    state.dayDates       = {};
     state.compareWeather = {};
     document.getElementById("legs-panel")?.remove();
     document.getElementById("map-layer-toggle")?.classList.add("hidden");
@@ -985,6 +996,155 @@ function exportToGoogleMaps() {
     let url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=${modeMap[state.mode] || "driving"}`;
     if (mid) url += `&waypoints=${encodeURIComponent(mid)}`;
     window.open(url, "_blank");
+}
+
+// ===== EV ELECTRIC VEHICLE =====
+async function loadEvVehicles() {
+    try {
+        const res = await fetch("/api/ev/vehicles");
+        state.evVehicles = await res.json();
+        const sel = document.getElementById("ev-vehicle-select");
+        if (!sel) return;
+        state.evVehicles.forEach((v) => {
+            const opt = document.createElement("option");
+            opt.value       = v.id;
+            opt.textContent = `${v.brand} ${v.model}`;
+            sel.appendChild(opt);
+        });
+    } catch (err) { console.error("EV vehicles load error:", err); }
+}
+
+function selectEvVehicle(id) {
+    const v = state.evVehicles.find((v) => v.id === id);
+    if (!v) return;
+    document.getElementById("ev-range").value       = v.range_km;
+    document.getElementById("ev-consumption").value = v.consumption;
+    document.getElementById("ev-battery-kwh").value = v.battery_kwh;
+    document.getElementById("ev-max-dc").value      = v.max_dc_kw;
+}
+
+function getEvSpecs() {
+    return {
+        consumption:  parseFloat(document.getElementById("ev-consumption").value) || 17,
+        battery_kwh:  parseFloat(document.getElementById("ev-battery-kwh").value) || 60,
+        max_dc_kw:    parseFloat(document.getElementById("ev-max-dc").value) || 100,
+    };
+}
+
+function getEvBattery() {
+    return {
+        start_pct: parseInt(document.getElementById("ev-start-pct").value, 10) || 80,
+        min_pct:   parseInt(document.getElementById("ev-min-pct").value, 10)   || 15,
+        max_pct:   parseInt(document.getElementById("ev-max-pct").value, 10)   || 80,
+    };
+}
+
+async function fetchEvChargingStops(dayIdx) {
+    const geometry = getDayGeometry(dayIdx);
+    if (!geometry) return;
+    const container = document.getElementById(`ev-stops-day-${dayIdx}`);
+    if (!container) return;
+    container.innerHTML = `<div class="seg-loading">&#9203; Calcolo soste ricarica...</div>`;
+
+    try {
+        const res = await fetch("/api/ev/charging-stops", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                geometry,
+                ev:            getEvSpecs(),
+                battery:       getEvBattery(),
+                connector_ids: [parseInt(document.getElementById("ev-connector").value, 10)],
+                min_kw:        parseInt(document.getElementById("ev-min-kw").value, 10),
+            }),
+        });
+        const stops = await res.json();
+        if (stops.error) { container.innerHTML = `<div class="seg-error">&#9888; ${escHtml(stops.error)}</div>`; return; }
+        renderEvStops(dayIdx, stops);
+    } catch (err) {
+        if (container) container.innerHTML = `<div class="seg-error">&#9888; Errore connessione</div>`;
+        console.error(err);
+    }
+}
+
+function renderEvStops(dayIdx, stops) {
+    const container = document.getElementById(`ev-stops-day-${dayIdx}`);
+    if (!container) return;
+    container.innerHTML = "";
+    if (!stops.length) {
+        container.innerHTML = `<div class="ev-stops-ok">&#9989; Nessuna sosta necessaria per questo giorno</div>`;
+        return;
+    }
+
+    const color = LEG_COLORS[dayIdx % LEG_COLORS.length];
+    const hdr   = document.createElement("div");
+    hdr.className = "ev-stops-header";
+    hdr.style.borderLeftColor = color;
+    hdr.innerHTML = `&#9889; ${stops.length} sosta${stops.length > 1 ? "e" : ""} di ricarica consigliata${stops.length > 1 ? "e" : ""}`;
+    container.appendChild(hdr);
+
+    stops.forEach((stop) => {
+        const card = document.createElement("div");
+        if (stop.error) {
+            card.className = "ev-stop-card ev-stop-error";
+            card.innerHTML = `&#9888; ${escHtml(stop.message || "Stazione non trovata")} &mdash; km ${stop.route_km}`;
+            container.appendChild(card);
+            return;
+        }
+        card.className = "ev-stop-card";
+        card.innerHTML = `
+            <div class="ev-stop-info">
+                <div class="ev-stop-name">&#9889; ${escHtml(stop.name)}</div>
+                <div class="ev-stop-addr">${escHtml(stop.address)}</div>
+                <div class="ev-stop-meta">
+                    <span class="ev-stop-kw">${stop.max_kw} kW</span>
+                    <span class="ev-stop-batt">${stop.battery_arrival_pct}% &#8594; ${stop.battery_after_pct}%</span>
+                    <span class="ev-stop-time">&#9201; ~${stop.charge_time_min} min</span>
+                    <span class="ev-stop-km">km ${stop.route_km}</span>
+                </div>
+            </div>
+            <button class="ev-stop-add-btn">+ Aggiungi</button>`;
+        card.querySelector(".ev-stop-add-btn").addEventListener("click", () => addChargerAsWaypoint(stop, dayIdx));
+        container.appendChild(card);
+
+        if (stop.lat && stop.lon) addEvMarker(stop);
+    });
+}
+
+function addEvMarker(stop) {
+    const icon = L.divIcon({
+        html:       `<div class="ev-map-marker">&#9889;</div>`,
+        className:  "",
+        iconSize:   [30, 30],
+        iconAnchor: [15, 15],
+    });
+    const m = L.marker([stop.lat, stop.lon], { icon })
+        .addTo(state.map)
+        .bindPopup(`<b>&#9889; ${stop.name}</b><br>${stop.address}<br><b>${stop.max_kw} kW</b> &mdash; ~${stop.charge_time_min} min di ricarica`);
+    state.evMarkers.push(m);
+}
+
+function clearEvMarkers() {
+    state.evMarkers.forEach((m) => m.remove());
+    state.evMarkers = [];
+}
+
+function addChargerAsWaypoint(stop, dayIdx) {
+    const allDays = computeWaypointDays();
+    let insertIdx = -1;
+    for (let i = state.waypoints.length - 1; i >= 0; i--) {
+        if (allDays[i] === dayIdx) { insertIdx = i; break; }
+    }
+    const id    = ++wpCounter;
+    const newWp = { id, name: stop.name, lat: stop.lat, lon: stop.lon, startNewDay: false };
+    if (insertIdx > 0) {
+        state.waypoints.splice(insertIdx, 0, newWp);
+    } else {
+        state.waypoints.push(newWp);
+    }
+    syncMarker(id);
+    renderWaypoints();
+    clearLegs();
+    scheduleRecalculate();
 }
 
 // ===== COMPARE WEATHER =====
