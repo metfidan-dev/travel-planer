@@ -647,45 +647,47 @@ def ev_charging_stops():
 
 
 def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw):
-    coords           = geometry.get("coordinates", [])
-    consumption_km   = ev["consumption"] / 100          # kWh per km
-    battery_kwh      = float(ev["battery_kwh"])
-    max_dc_kw        = float(ev["max_dc_kw"])
+    coords         = geometry.get("coordinates", [])
+    consumption_km = ev["consumption"] / 100
+    battery_kwh    = float(ev["battery_kwh"])
+    max_dc_kw      = float(ev["max_dc_kw"])
+    current_kwh    = battery["start_pct"] / 100 * battery_kwh
+    min_kwh        = battery["min_pct"]   / 100 * battery_kwh
+    max_kwh        = battery["max_pct"]   / 100 * battery_kwh
+    alert_kwh      = min_kwh + battery_kwh * 0.15
 
-    current_kwh      = battery["start_pct"] / 100 * battery_kwh
-    min_kwh          = battery["min_pct"]   / 100 * battery_kwh
-    max_kwh          = battery["max_pct"]   / 100 * battery_kwh
-    alert_kwh        = min_kwh + battery_kwh * 0.15     # start searching 15 % before empty
-
-    stops        = []
-    cumulative   = 0.0
-
+    # Phase 1 – pure math, no network: find WHERE charging is needed
+    needed     = []   # (lat, lon, arr_kwh, route_km)
+    cumulative = 0.0
     for i in range(1, len(coords)):
-        seg = _haversine(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1])
-        cumulative    += seg
-        current_kwh   -= seg * consumption_km
-
+        seg          = _haversine(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1])
+        cumulative  += seg
+        current_kwh -= seg * consumption_km
         if current_kwh <= alert_kwh:
-            lat, lon = coords[i][1], coords[i][0]
-            arr_pct  = round(max(current_kwh, 0) / battery_kwh * 100, 1)
-            station  = _find_ocm_station(lat, lon, connector_ids, min_kw)
+            needed.append((coords[i][1], coords[i][0], max(current_kwh, 0), round(cumulative, 1)))
+            current_kwh = max_kwh   # assume charging, continue simulation
 
-            if station:
-                charger_kw = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
-                station["battery_arrival_pct"] = arr_pct
-                station["battery_after_pct"]   = round(max_kwh / battery_kwh * 100, 1)
-                station["charge_time_min"]      = _calc_charge_time(
-                    max(current_kwh, 0), max_kwh, battery_kwh, charger_kw)
-                station["route_km"]             = round(cumulative, 1)
-                stops.append(station)
-                current_kwh = max_kwh
-            else:
-                stops.append({"error": True, "lat": lat, "lon": lon,
-                               "battery_arrival_pct": arr_pct, "route_km": round(cumulative, 1),
-                               "message": "Nessuna stazione trovata in zona"})
-                current_kwh = min_kwh  # pessimistic: assume user found something minimal
+    if not needed:
+        return []
 
-    return stops
+    # Phase 2 – parallel OCM lookups (one per stop, not one per coordinate)
+    def fetch(loc):
+        lat, lon, arr_kwh, km = loc
+        arr_pct = round(arr_kwh / battery_kwh * 100, 1)
+        station = _find_ocm_station(lat, lon, connector_ids, min_kw)
+        if station:
+            kw = min(max_dc_kw, station.get("max_kw") or max_dc_kw)
+            return {**station,
+                    "battery_arrival_pct": arr_pct,
+                    "battery_after_pct":   round(max_kwh / battery_kwh * 100, 1),
+                    "charge_time_min":     _calc_charge_time(arr_kwh, max_kwh, battery_kwh, kw),
+                    "route_km":            km}
+        return {"error": True, "lat": lat, "lon": lon,
+                "battery_arrival_pct": arr_pct, "route_km": km,
+                "message": "Nessuna stazione trovata in zona"}
+
+    with ThreadPoolExecutor(max_workers=min(len(needed), 5)) as ex:
+        return list(ex.map(fetch, needed))
 
 
 def _calc_charge_time(current_kwh, target_kwh, battery_kwh, charger_kw):
