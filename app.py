@@ -674,12 +674,13 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
     stops_zone_cands = []   # full safe zone sample points (for expanded search)
     stops_zone_pts   = []   # full safe zone raw route coords
 
-    candidates  = []   # sample points since last charge
-    zone_pts    = []   # route coords since last charge (lat, lon, km)
-    cumulative  = 0.0
-    next_sample = float(interval_km)
-    alert_fired = False   # True once current_kwh <= alert_kwh
-    alert_km    = 0.0     # cumulative km when alert fired
+    candidates     = []   # sample points since last charge
+    zone_pts       = []   # route coords since last charge (lat, lon, km)
+    cumulative     = 0.0
+    next_sample    = float(interval_km)
+    alert_fired    = False   # True once current_kwh <= alert_kwh
+    alert_km       = 0.0     # cumulative km when alert fired
+    zone_start_kwh = current_kwh  # battery at start of current zone (after last charge)
 
     def _finalize_stop(cur_lat, cur_lon):
         """Append one charging stop from accumulated candidates/zone_pts."""
@@ -696,7 +697,9 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             z_pts = z_pts[::step]
 
         if not w_cands:
-            w_cands = [(cur_lat, cur_lon, 0.0, round(alert_km, 1))]
+            # Estimate realistic battery at alert point (not 0.0 which kills scoring)
+            est_kwh = max(zone_start_kwh - alert_km * consumption_km, 0.0)
+            w_cands = [(cur_lat, cur_lon, est_kwh, round(alert_km, 1))]
         if not w_pts:
             w_pts = z_pts or [(cur_lat, cur_lon)]
         if not z_cands:
@@ -738,12 +741,13 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         # Finalize stop only when we reach the true minimum (full posticipate zone)
         if alert_fired and current_kwh <= min_kwh:
             _finalize_stop(p1[1], p1[0])
-            candidates  = []
-            zone_pts    = []
-            next_sample = cumulative + interval_km
-            current_kwh = max_kwh
-            alert_fired = False
-            alert_km    = 0.0
+            candidates     = []
+            zone_pts       = []
+            next_sample    = cumulative + interval_km
+            current_kwh    = max_kwh
+            alert_fired    = False
+            alert_km       = 0.0
+            zone_start_kwh = max_kwh
 
     # End of route: if alert fired but min_kwh never reached, still add the stop
     if alert_fired and candidates:
@@ -833,9 +837,11 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
                 max(lats) + buf_deg, max(lons) + buf_deg)
 
     def resolve_stop(cands, window_pts, zone_cands, zone_pts):
-        buf  = corridor_km / 111.0
-        w_bbox = _make_bbox(cands, buf)
-        z_bbox = _make_bbox(zone_cands, buf)
+        buf    = corridor_km / 111.0
+        w_bbox = _make_bbox(cands if len(cands) > 1 else window_pts or cands, buf)
+        # Use dense route geometry (zone_pts) for z_bbox — far more accurate than
+        # sparse sample points (zone_cands) when zone < interval_km
+        z_bbox = _make_bbox(zone_pts if len(zone_pts) > 1 else zone_cands, buf)
 
         # ── Primary search: optimal window (last window_km before alert) ──────
         # Tier 1: with connector/power filters
