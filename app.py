@@ -725,27 +725,33 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         return result
 
     def resolve_stop(cands):
-        # Tier 1: corridor search along route — sample points at corridor_km radius
-        for loc in cands:
-            station = _find_ocm_station(loc[0], loc[1], connector_ids, min_kw,
-                                        radius_km=corridor_km)
-            if station:
-                return _build_result(station, loc)
+        lats = [c[0] for c in cands]
+        lons = [c[1] for c in cands]
+        # bounding box that encloses all candidate points + corridor buffer
+        buf  = corridor_km / 111.0
+        bbox = (min(lats) - buf, min(lons) - buf,
+                max(lats) + buf, max(lons) + buf)
 
-        # Tier 2: last candidate, wider corridor (2×), same filters
+        # Tier 1: single bbox query → all stations in zone with filters
+        #         pick the one closest to the route line (not just to one point)
+        stations = _find_ocm_bbox(bbox, connector_ids, min_kw)
+        station, loc = _closest_on_route(stations, cands, corridor_km)
+        if station:
+            return _build_result(station, loc)
+
+        # Tier 2: same results, wider corridor (2×) — no extra API call
+        station, loc = _closest_on_route(stations, cands, corridor_km * 2)
+        if station:
+            return _build_result(station, loc, fallback=True)
+
+        # Tier 3: bbox query without connector/power filters
+        stations_nf = _find_ocm_bbox(bbox, [], 0)
+        station, loc = _closest_on_route(stations_nf, cands, corridor_km * 2)
+        if station:
+            return _build_result(station, loc, fallback=True, fallback_nofilter=True)
+
+        # Tier 4: Overpass/OSM — free, no key, last candidate as center
         last    = cands[-1]
-        station = _find_ocm_station(last[0], last[1], connector_ids, min_kw,
-                                    radius_km=corridor_km * 2)
-        if station:
-            return _build_result(station, last, fallback=True)
-
-        # Tier 3: last candidate, wider corridor, no filters
-        station = _find_ocm_station(last[0], last[1], [], 0,
-                                    radius_km=corridor_km * 2)
-        if station:
-            return _build_result(station, last, fallback=True, fallback_nofilter=True)
-
-        # Tier 4: Overpass/OSM, last candidate, wider corridor
         station = _find_overpass_station(last[0], last[1],
                                          radius_m=int(corridor_km * 2000))
         if station:
@@ -817,6 +823,69 @@ def _find_ocm_station(lat, lon, connector_ids, min_kw, radius_km=20):
         "connectors": conn_names[:3],
         "ocm_id":     best.get("ID"),
     }
+
+
+def _parse_ocm_item(item):
+    addr  = item.get("AddressInfo", {})
+    conns = item.get("Connections") or []
+    max_kw = max((c.get("PowerKW") or 0) for c in conns) if conns else 0
+    conn_names = list({c.get("ConnectionType", {}).get("Title", "")
+                       for c in conns if c.get("ConnectionType")})
+    return {
+        "lat":        addr.get("Latitude"),
+        "lon":        addr.get("Longitude"),
+        "name":       addr.get("Title", "Stazione di ricarica"),
+        "address":    f"{addr.get('AddressLine1', '')}, {addr.get('Town', '')}".strip(", "),
+        "max_kw":     round(float(max_kw), 1),
+        "connectors": conn_names[:3],
+        "ocm_id":     item.get("ID"),
+    }
+
+
+def _find_ocm_bbox(bbox, connector_ids, min_kw, maxresults=50):
+    """Query OCM with a bounding box — returns all stations in the zone at once."""
+    lat_min, lon_min, lat_max, lon_max = bbox
+    params = {
+        "output":      "json",
+        "boundingbox": f"({lat_min},{lon_min},{lat_max},{lon_max})",
+        "maxresults":  maxresults,
+        "compact":     "true",
+        "verbose":     "false",
+    }
+    if OCM_API_KEY:
+        params["key"] = OCM_API_KEY
+    if connector_ids:
+        params["connectiontypeid"] = ",".join(str(c) for c in connector_ids)
+    if min_kw and min_kw > 0:
+        params["minpowerkw"] = min_kw
+    try:
+        resp = requests.get(OCM_URL, params=params, headers=HEADERS, timeout=15)
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        return [_parse_ocm_item(s) for s in data
+                if s.get("AddressInfo", {}).get("Latitude")]
+    except Exception:
+        return []
+
+
+def _closest_on_route(stations, cands, max_dist_km):
+    """Return (station, nearest_candidate_loc) for the station closest to any route candidate."""
+    best_dist    = max_dist_km
+    best_station = None
+    best_loc     = None
+    for station in stations:
+        slat = station.get("lat")
+        slon = station.get("lon")
+        if slat is None or slon is None:
+            continue
+        for loc in cands:
+            d = _haversine(loc[1], loc[0], slon, slat)
+            if d < best_dist:
+                best_dist    = d
+                best_station = station
+                best_loc     = loc
+    return best_station, best_loc
 
 
 def _find_overpass_station(lat, lon, radius_m=50000):
