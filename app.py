@@ -750,8 +750,11 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
                 continue
 
             # True distance from station to the road (dense geometry)
-            best_d = min(_haversine(wlat, wlon, slon, slat)
-                         for wlat, wlon in window_pts)
+            if not window_pts:
+                best_d = _haversine(cands[-1][1], cands[-1][0], slon, slat)
+            else:
+                best_d = min(_haversine(wlat, wlon, slon, slat)
+                             for wlat, wlon in window_pts)
 
             # Nearest sample point → battery estimation + route_km
             best_cand_d = float("inf")
@@ -808,6 +811,14 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
             last = cands[-1]
             st   = _find_overpass_station(last[0], last[1],
                                           radius_m=int(corridor_km * 2000))
+            if st:
+                scored = _score_stations([st], cands, window_pts,
+                                         fallback=True, fallback_nofilter=True)
+
+        # Tier 5 (last resort): single-point OCM query, no filters, 50 km radius
+        if not scored:
+            last = cands[-1]
+            st   = _find_ocm_station(last[0], last[1], [], 0, radius_km=50)
             if st:
                 scored = _score_stations([st], cands, window_pts,
                                          fallback=True, fallback_nofilter=True)
@@ -907,7 +918,7 @@ def _find_ocm_bbox(bbox, connector_ids, min_kw, maxresults=50):
     lat_min, lon_min, lat_max, lon_max = bbox
     params = {
         "output":      "json",
-        "boundingbox": f"({lat_min},{lon_min},{lat_max},{lon_max})",
+        "boundingbox": f"({lat_min},{lon_min}),({lat_max},{lon_max})",
         "maxresults":  maxresults,
         "compact":     "true",
         "verbose":     "false",
