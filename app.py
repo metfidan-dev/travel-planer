@@ -145,10 +145,15 @@ def calculate_route():
 
     try:
         if profile == "motorcycle":
-            if curves_per_leg and len(curves_per_leg) == len(waypoints) - 1:
-                result = _call_valhalla_per_leg(waypoints, curves_per_leg)
-            else:
-                result = _call_valhalla(waypoints, curves)
+            try:
+                if curves_per_leg and len(curves_per_leg) == len(waypoints) - 1:
+                    result = _call_valhalla_per_leg(waypoints, curves_per_leg)
+                else:
+                    result = _call_valhalla(waypoints, curves)
+            except requests.RequestException:
+                # Valhalla down — fall back to OSRM (no curve preference)
+                result = _call_osrm(waypoints, "driving")
+                result["warning"] = "Servizio Valhalla non disponibile, utilizzato percorso standard (preferenza curve ignorata)"
         elif profile == "electric":
             result = _call_osrm(waypoints, "driving")
         else:
@@ -826,8 +831,11 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         return results
 
     def _ocm_scored(bbox, conn_ids, pw, cands, pts, fallback=False, nf=False):
-        """Query OCM with bbox and score results. Returns sorted list."""
         sts = _find_ocm_bbox(bbox, conn_ids, pw)
+        return _score_stations(sts, cands, pts, fallback=fallback, fallback_nofilter=nf)
+
+    def _ovp_scored(bbox, cands, pts, fallback=True, nf=True):
+        sts = _find_overpass_bbox(bbox)
         return _score_stations(sts, cands, pts, fallback=fallback, fallback_nofilter=nf)
 
     def _make_bbox(cands_or_pts, buf_deg):
@@ -843,36 +851,33 @@ def _find_ev_stops(geometry, ev, battery, connector_ids, min_kw, interval_km=20)
         # sparse sample points (zone_cands) when zone < interval_km
         z_bbox = _make_bbox(zone_pts if len(zone_pts) > 1 else zone_cands, buf)
 
-        # ── Primary search: optimal window (last window_km before alert) ──────
-        # Tier 1: with connector/power filters
+        # ── Tier 1-3: OCM primary window ─────────────────────────────────────
         scored = _ocm_scored(w_bbox, connector_ids, min_kw, cands, window_pts)
-        # Tier 2: same stations, no reachability restriction (fallback badge)
         if not scored:
-            scored = _ocm_scored(w_bbox, connector_ids, min_kw,
-                                 cands, window_pts, fallback=True)
-        # Tier 3: no connector/power filters
+            scored = _ocm_scored(w_bbox, connector_ids, min_kw, cands, window_pts, fallback=True)
         if not scored:
-            scored = _ocm_scored(w_bbox, [], 0, cands, window_pts,
-                                 fallback=True, nf=True)
+            scored = _ocm_scored(w_bbox, [], 0, cands, window_pts, fallback=True, nf=True)
+        # Tier 4: Overpass primary window (free, no API key, reliable backup)
+        if not scored:
+            scored = _ovp_scored(w_bbox, cands, window_pts)
 
         if scored:
             top3 = scored[:3]
             return {**top3[0], "candidates": top3}
 
-        # ── Extended search: full safe zone (anticipate or posticipate) ───────
-        # Tier 4: full zone, with filters
-        scored = _ocm_scored(z_bbox, connector_ids, min_kw,
-                             zone_cands, zone_pts, fallback=True)
-        # Tier 5: full zone, no filters
+        # ── Tier 5-7: extended zone (anticipate/posticipate) ─────────────────
+        scored = _ocm_scored(z_bbox, connector_ids, min_kw, zone_cands, zone_pts, fallback=True)
         if not scored:
-            scored = _ocm_scored(z_bbox, [], 0, zone_cands, zone_pts,
-                                 fallback=True, nf=True)
+            scored = _ocm_scored(z_bbox, [], 0, zone_cands, zone_pts, fallback=True, nf=True)
+        # Tier 7: Overpass full zone
+        if not scored:
+            scored = _ovp_scored(z_bbox, zone_cands, zone_pts)
 
         if scored:
             top3 = scored[:3]
             return {**top3[0], "candidates": top3, "extended_search": True}
 
-        # ── Last resort: Overpass/OSM + single-point OCM ──────────────────────
+        # ── Last resort: Overpass/OCM single-point (50 km radius) ────────────
         last = zone_cands[-1]
         for st in [
             _find_overpass_station(last[0], last[1], radius_m=50000),
@@ -1030,33 +1035,30 @@ def _find_overpass_station(lat, lon, radius_m=50000):
         f"out center 5;"
     )
     try:
-        resp = requests.post(
-            OVERPASS_URL,
-            data={"data": query},
-            headers=HEADERS,
-            timeout=30,
-        )
+        resp = requests.post(OVERPASS_URL, data={"data": query}, headers=HEADERS, timeout=30)
         data = resp.json()
     except Exception:
         return None
-
     elements = data.get("elements", [])
     if not elements:
         return None
+    return _parse_overpass_element(elements[0])
 
-    best = elements[0]
-    if best.get("type") == "way":
-        elt_lat = best.get("center", {}).get("lat", lat)
-        elt_lon = best.get("center", {}).get("lon", lon)
+
+def _parse_overpass_element(el):
+    """Convert a single Overpass element to the internal station dict."""
+    if el.get("type") == "way":
+        elt_lat = el.get("center", {}).get("lat")
+        elt_lon = el.get("center", {}).get("lon")
     else:
-        elt_lat = best.get("lat", lat)
-        elt_lon = best.get("lon", lon)
-
-    tags    = best.get("tags", {})
+        elt_lat = el.get("lat")
+        elt_lon = el.get("lon")
+    if elt_lat is None or elt_lon is None:
+        return None
+    tags    = el.get("tags", {})
     name    = tags.get("name") or tags.get("operator") or "Stazione di ricarica (OSM)"
     address = ", ".join(p for p in [tags.get("addr:street", ""), tags.get("addr:city", "")] if p)
-
-    max_kw = 0.0
+    max_kw  = 0.0
     for key in ("maxpower", "socket:type2_combo:output", "socket:chademo:output", "socket:type2:output"):
         raw = tags.get(key, "")
         if raw:
@@ -1067,12 +1069,10 @@ def _find_overpass_station(lat, lon, radius_m=50000):
                 max_kw = max(max_kw, val)
             except (ValueError, TypeError):
                 pass
-
     connectors = []
     for sock_key, label in [("socket:type2_combo", "CCS"), ("socket:chademo", "CHAdeMO"), ("socket:type2", "Type 2")]:
         if tags.get(sock_key):
             connectors.append(label)
-
     return {
         "lat":        elt_lat,
         "lon":        elt_lon,
@@ -1082,6 +1082,25 @@ def _find_overpass_station(lat, lon, radius_m=50000):
         "connectors": connectors or ["Tipo non specificato"],
         "ocm_id":     None,
     }
+
+
+def _find_overpass_bbox(bbox):
+    """Query OSM via Overpass for all EV charging stations within a bounding box."""
+    lat_min, lon_min, lat_max, lon_max = bbox
+    query = (
+        f"[out:json][timeout:30];"
+        f"("
+        f'node["amenity"="charging_station"]({lat_min},{lon_min},{lat_max},{lon_max});'
+        f'way["amenity"="charging_station"]({lat_min},{lon_min},{lat_max},{lon_max});'
+        f");"
+        f"out center 100;"
+    )
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": query}, headers=HEADERS, timeout=35)
+        data = resp.json()
+    except Exception:
+        return []
+    return [s for s in (_parse_overpass_element(el) for el in data.get("elements", [])) if s]
 
 
 @app.route("/api/import-gmaps", methods=["POST"])
