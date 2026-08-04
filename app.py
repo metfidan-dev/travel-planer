@@ -1,6 +1,7 @@
 import math
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs, unquote_plus
@@ -212,17 +213,22 @@ def weather_segment():
         pt_hour = point_dt.hour
 
         try:
-            r = requests.get(
-                f"{OPEN_METEO_URL}/forecast",
-                params={
-                    "latitude": pt["lat"], "longitude": pt["lon"],
-                    "hourly": ("temperature_2m,apparent_temperature,precipitation_probability,"
-                               "precipitation,weathercode,windspeed_10m,winddirection_10m,cloudcover"),
-                    "start_date": pt_date, "end_date": pt_date,
-                    "timezone": "auto", "wind_speed_unit": "kmh",
-                },
-                timeout=12,
-            )
+            for attempt in range(3):
+                r = requests.get(
+                    f"{OPEN_METEO_URL}/forecast",
+                    params={
+                        "latitude": pt["lat"], "longitude": pt["lon"],
+                        "hourly": ("temperature_2m,apparent_temperature,precipitation_probability,"
+                                   "precipitation,weathercode,windspeed_10m,winddirection_10m,cloudcover"),
+                        "start_date": pt_date, "end_date": pt_date,
+                        "timezone": "auto", "wind_speed_unit": "kmh",
+                    },
+                    timeout=12,
+                )
+                if r.status_code == 429 and attempt < 2:
+                    time.sleep(float(r.headers.get("Retry-After", 1)) + attempt)
+                    continue
+                break
             r.raise_for_status()
             h = r.json().get("hourly", {})
             if pt_hour >= len(h.get("temperature_2m", [])):
@@ -247,7 +253,7 @@ def weather_segment():
             app.logger.error("weather fetch failed for lat=%s lon=%s: %s", pt["lat"], pt["lon"], exc)
             return {"lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"], "error": str(exc)}
 
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=5) as ex:
         results = list(ex.map(fetch, points))
 
     return jsonify([r for r in results if r is not None])
