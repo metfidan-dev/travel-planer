@@ -205,58 +205,70 @@ def weather_segment():
 
     points = _sample_route_points(coords, interval_km=interval_km)
 
-    def fetch(pt):
+    by_date = {}
+    for pt in points:
         fraction = min(pt["dist_km"] / distance_km, 1.0) if distance_km > 0 else 0.0
-        offset = timedelta(seconds=fraction * duration_sec)
-        point_dt = departure + offset
+        point_dt = departure + timedelta(seconds=fraction * duration_sec)
         pt_date = point_dt.strftime("%Y-%m-%d")
-        pt_hour = point_dt.hour
+        by_date.setdefault(pt_date, []).append({**pt, "point_dt": point_dt, "pt_hour": point_dt.hour})
 
+    def fetch_date_group(pt_date, group):
+        # Batch all points for a given day into a single Open-Meteo call
+        # (comma-separated lat/lon) to avoid tripping the shared-IP rate limit.
         try:
             for attempt in range(3):
                 r = requests.get(
                     f"{OPEN_METEO_URL}/forecast",
                     params={
-                        "latitude": pt["lat"], "longitude": pt["lon"],
+                        "latitude": ",".join(str(p["lat"]) for p in group),
+                        "longitude": ",".join(str(p["lon"]) for p in group),
                         "hourly": ("temperature_2m,apparent_temperature,precipitation_probability,"
                                    "precipitation,weathercode,windspeed_10m,winddirection_10m,cloudcover"),
                         "start_date": pt_date, "end_date": pt_date,
                         "timezone": "auto", "wind_speed_unit": "kmh",
                     },
-                    timeout=12,
+                    timeout=15,
                 )
                 if r.status_code == 429 and attempt < 2:
-                    time.sleep(float(r.headers.get("Retry-After", 1)) + attempt)
+                    time.sleep(float(r.headers.get("Retry-After", 2)) + attempt * 2)
                     continue
                 break
             r.raise_for_status()
-            h = r.json().get("hourly", {})
-            if pt_hour >= len(h.get("temperature_2m", [])):
-                return None
-            code = h["weathercode"][pt_hour]
-            return {
-                "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
-                "estimated_time": point_dt.strftime("%H:%M"),
-                "estimated_date": pt_date,
-                "temperature": round(h["temperature_2m"][pt_hour], 1),
-                "apparent_temperature": round(h["apparent_temperature"][pt_hour], 1),
-                "precipitation_probability": h["precipitation_probability"][pt_hour],
-                "precipitation": h["precipitation"][pt_hour],
-                "weathercode": code,
-                "weather_description": WMO_DESCRIPTIONS.get(code, f"Codice {code}"),
-                "weather_icon": WMO_ICONS.get(code, "🌡️"),
-                "windspeed": round(h["windspeed_10m"][pt_hour], 1),
-                "winddirection": h["winddirection_10m"][pt_hour],
-                "cloudcover": h["cloudcover"][pt_hour],
-            }
+            payload = r.json()
+            locations = payload if isinstance(payload, list) else [payload]
+
+            results = []
+            for pt, loc in zip(group, locations):
+                h = loc.get("hourly", {})
+                pt_hour = pt["pt_hour"]
+                if pt_hour >= len(h.get("temperature_2m", [])):
+                    continue
+                code = h["weathercode"][pt_hour]
+                results.append({
+                    "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
+                    "estimated_time": pt["point_dt"].strftime("%H:%M"),
+                    "estimated_date": pt_date,
+                    "temperature": round(h["temperature_2m"][pt_hour], 1),
+                    "apparent_temperature": round(h["apparent_temperature"][pt_hour], 1),
+                    "precipitation_probability": h["precipitation_probability"][pt_hour],
+                    "precipitation": h["precipitation"][pt_hour],
+                    "weathercode": code,
+                    "weather_description": WMO_DESCRIPTIONS.get(code, f"Codice {code}"),
+                    "weather_icon": WMO_ICONS.get(code, "🌡️"),
+                    "windspeed": round(h["windspeed_10m"][pt_hour], 1),
+                    "winddirection": h["winddirection_10m"][pt_hour],
+                    "cloudcover": h["cloudcover"][pt_hour],
+                })
+            return results
         except Exception as exc:
-            app.logger.error("weather fetch failed for lat=%s lon=%s: %s", pt["lat"], pt["lon"], exc)
-            return {"lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"], "error": str(exc)}
+            app.logger.error("weather fetch failed for date=%s (%d points): %s", pt_date, len(group), exc)
+            return [{"lat": p["lat"], "lon": p["lon"], "dist_km": p["dist_km"], "error": str(exc)} for p in group]
 
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        results = list(ex.map(fetch, points))
+    results = []
+    for pt_date, group in by_date.items():
+        results.extend(fetch_date_group(pt_date, group))
 
-    return jsonify([r for r in results if r is not None])
+    return jsonify(results)
 
 
 @app.route("/api/traffic-segment", methods=["POST"])
