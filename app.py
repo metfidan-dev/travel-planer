@@ -13,7 +13,8 @@ app = Flask(__name__)
 NOMINATIM_URL  = "https://nominatim.openstreetmap.org"
 OSRM_URL       = "http://router.project-osrm.org"
 VALHALLA_URL   = "https://valhalla1.openstreetmap.de"
-OPEN_METEO_URL = "https://api.open-meteo.com/v1"
+VISUALCROSSING_URL     = "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
+VISUALCROSSING_API_KEY = os.environ.get("VISUALCROSSING_API_KEY", "")
 TOMTOM_ROUTING = "https://api.tomtom.com/routing/1/calculateRoute"
 TOMTOM_MODES   = {"driving": "car", "motorcycle": "motorcycle", "cycling": "bicycle", "walking": "pedestrian"}
 OCM_URL        = "https://api.openchargemap.io/v3/poi/"
@@ -56,28 +57,14 @@ EV_VEHICLES = [
     {"id": "cupra-born",     "brand": "Cupra",    "model": "Born 170hp 58 kWh",        "range_km": 424, "consumption": 15.4, "battery_kwh": 58.0,  "max_dc_kw": 100},
 ]
 
-WMO_DESCRIPTIONS = {
-    0: "Cielo sereno", 1: "Prevalentemente sereno", 2: "Parzialmente nuvoloso", 3: "Nuvoloso",
-    45: "Nebbia", 48: "Nebbia con brina",
-    51: "Pioggerellina leggera", 53: "Pioggerellina moderata", 55: "Pioggerellina intensa",
-    56: "Pioggerellina gelata leggera", 57: "Pioggerellina gelata intensa",
-    61: "Pioggia leggera", 63: "Pioggia moderata", 65: "Pioggia intensa",
-    66: "Pioggia gelata leggera", 67: "Pioggia gelata intensa",
-    71: "Neve leggera", 73: "Neve moderata", 75: "Neve intensa", 77: "Neve granulare",
-    80: "Rovesci leggeri", 81: "Rovesci moderati", 82: "Rovesci violenti",
-    85: "Rovesci di neve", 86: "Rovesci di neve intensi",
-    95: "Temporale", 96: "Temporale con grandine", 99: "Temporale con grandine intensa",
-}
-
-WMO_ICONS = {
-    0: "☀️", 1: "🌤️", 2: "⛅", 3: "☁️",
-    45: "🌫️", 48: "🌫️",
-    51: "🌦️", 53: "🌦️", 55: "🌦️", 56: "🌧️", 57: "🌧️",
-    61: "🌧️", 63: "🌧️", 65: "🌧️", 66: "🌨️", 67: "🌨️",
-    71: "❄️", 73: "❄️", 75: "❄️", 77: "🌨️",
-    80: "🌧️", 81: "🌧️", 82: "⛈️",
-    85: "🌨️", 86: "🌨️",
-    95: "⛈️", 96: "⛈️", 99: "⛈️",
+VC_ICON_IT = {
+    "clear-day": ("Cielo sereno", "☀️"), "clear-night": ("Cielo sereno", "🌙"),
+    "partly-cloudy-day": ("Parzialmente nuvoloso", "⛅"), "partly-cloudy-night": ("Parzialmente nuvoloso", "☁️"),
+    "cloudy": ("Nuvoloso", "☁️"), "fog": ("Nebbia", "🌫️"), "wind": ("Ventoso", "💨"),
+    "rain": ("Pioggia", "🌧️"), "showers-day": ("Rovesci", "🌦️"), "showers-night": ("Rovesci", "🌦️"),
+    "sleet": ("Nevischio", "🌨️"), "snow": ("Neve", "❄️"),
+    "thunder-rain": ("Temporale", "⛈️"), "thunder-showers-day": ("Temporale", "⛈️"),
+    "thunder-showers-night": ("Temporale", "⛈️"), "hail": ("Grandine", "⛈️"),
 }
 
 TRAFFIC_LABELS = {1: "Libero", 2: "Scorrevole", 3: "Moderato", 4: "Intenso", 5: "Molto intenso"}
@@ -200,75 +187,66 @@ def weather_segment():
 
     end_dt = departure + timedelta(seconds=max(duration_sec, 0))
     end_days = (end_dt.replace(hour=0, minute=0, second=0, microsecond=0) - today).days
-    if end_days > 16:
-        return jsonify({"error": "Il viaggio supera il limite di previsioni di 16 giorni"}), 400
+    if end_days > 15:
+        return jsonify({"error": "Il viaggio supera il limite di previsioni di 15 giorni"}), 400
+
+    if not VISUALCROSSING_API_KEY:
+        return jsonify({"error": "VISUALCROSSING_API_KEY non configurata sul server"}), 500
 
     points = _sample_route_points(coords, interval_km=interval_km)
 
-    by_date = {}
-    for pt in points:
+    def fetch(pt):
         fraction = min(pt["dist_km"] / distance_km, 1.0) if distance_km > 0 else 0.0
-        point_dt = departure + timedelta(seconds=fraction * duration_sec)
+        offset = timedelta(seconds=fraction * duration_sec)
+        point_dt = departure + offset
         pt_date = point_dt.strftime("%Y-%m-%d")
-        by_date.setdefault(pt_date, []).append({**pt, "point_dt": point_dt, "pt_hour": point_dt.hour})
+        pt_hour = point_dt.hour
 
-    def fetch_date_group(pt_date, group):
-        # Batch all points for a given day into a single Open-Meteo call
-        # (comma-separated lat/lon) to avoid tripping the shared-IP rate limit.
         try:
             for attempt in range(3):
                 r = requests.get(
-                    f"{OPEN_METEO_URL}/forecast",
+                    f"{VISUALCROSSING_URL}/{pt['lat']},{pt['lon']}/{pt_date}/{pt_date}",
                     params={
-                        "latitude": ",".join(str(p["lat"]) for p in group),
-                        "longitude": ",".join(str(p["lon"]) for p in group),
-                        "hourly": ("temperature_2m,apparent_temperature,precipitation_probability,"
-                                   "precipitation,weathercode,windspeed_10m,winddirection_10m,cloudcover"),
-                        "start_date": pt_date, "end_date": pt_date,
-                        "timezone": "auto", "wind_speed_unit": "kmh",
+                        "unitGroup": "metric",
+                        "include": "hours",
+                        "elements": "datetime,temp,feelslike,precip,precipprob,windspeed,winddir,cloudcover,icon",
+                        "contentType": "json",
+                        "key": VISUALCROSSING_API_KEY,
                     },
                     timeout=15,
                 )
                 if r.status_code == 429 and attempt < 2:
-                    time.sleep(float(r.headers.get("Retry-After", 2)) + attempt * 2)
+                    time.sleep(2 + attempt * 2)
                     continue
                 break
             r.raise_for_status()
-            payload = r.json()
-            locations = payload if isinstance(payload, list) else [payload]
-
-            results = []
-            for pt, loc in zip(group, locations):
-                h = loc.get("hourly", {})
-                pt_hour = pt["pt_hour"]
-                if pt_hour >= len(h.get("temperature_2m", [])):
-                    continue
-                code = h["weathercode"][pt_hour]
-                results.append({
-                    "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
-                    "estimated_time": pt["point_dt"].strftime("%H:%M"),
-                    "estimated_date": pt_date,
-                    "temperature": round(h["temperature_2m"][pt_hour], 1),
-                    "apparent_temperature": round(h["apparent_temperature"][pt_hour], 1),
-                    "precipitation_probability": h["precipitation_probability"][pt_hour],
-                    "precipitation": h["precipitation"][pt_hour],
-                    "weathercode": code,
-                    "weather_description": WMO_DESCRIPTIONS.get(code, f"Codice {code}"),
-                    "weather_icon": WMO_ICONS.get(code, "🌡️"),
-                    "windspeed": round(h["windspeed_10m"][pt_hour], 1),
-                    "winddirection": h["winddirection_10m"][pt_hour],
-                    "cloudcover": h["cloudcover"][pt_hour],
-                })
-            return results
+            hours = (r.json().get("days") or [{}])[0].get("hours", [])
+            if pt_hour >= len(hours):
+                return None
+            hr = hours[pt_hour]
+            desc, icon = VC_ICON_IT.get(hr.get("icon"), (hr.get("icon") or "N/D", "🌡️"))
+            return {
+                "lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"],
+                "estimated_time": point_dt.strftime("%H:%M"),
+                "estimated_date": pt_date,
+                "temperature": round(hr["temp"], 1),
+                "apparent_temperature": round(hr["feelslike"], 1),
+                "precipitation_probability": hr["precipprob"],
+                "precipitation": hr["precip"],
+                "weather_description": desc,
+                "weather_icon": icon,
+                "windspeed": round(hr["windspeed"], 1),
+                "winddirection": hr["winddir"],
+                "cloudcover": hr["cloudcover"],
+            }
         except Exception as exc:
-            app.logger.error("weather fetch failed for date=%s (%d points): %s", pt_date, len(group), exc)
-            return [{"lat": p["lat"], "lon": p["lon"], "dist_km": p["dist_km"], "error": str(exc)} for p in group]
+            app.logger.error("weather fetch failed for lat=%s lon=%s: %s", pt["lat"], pt["lon"], exc)
+            return {"lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"], "error": str(exc)}
 
-    results = []
-    for pt_date, group in by_date.items():
-        results.extend(fetch_date_group(pt_date, group))
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        results = list(ex.map(fetch, points))
 
-    return jsonify(results)
+    return jsonify([r for r in results if r is not None])
 
 
 @app.route("/api/traffic-segment", methods=["POST"])
