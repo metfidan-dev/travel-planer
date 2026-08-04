@@ -244,6 +244,7 @@ def weather_segment():
                 "cloudcover": h["cloudcover"][pt_hour],
             }
         except Exception as exc:
+            app.logger.error("weather fetch failed for lat=%s lon=%s: %s", pt["lat"], pt["lon"], exc)
             return {"lat": pt["lat"], "lon": pt["lon"], "dist_km": pt["dist_km"], "error": str(exc)}
 
     with ThreadPoolExecutor(max_workers=10) as ex:
